@@ -1,0 +1,29 @@
+plugins {
+    id 'java'
+}
+
+group = 'org.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.netbeans.external:org-apache-commons-lang3:RELEASE130'
+    implementation 'org.apache.spark:spark-core_2.13:3.5.1'
+    implementation 'org.apache.spark:spark-sql_2.13:3.5.1'
+    implementation 'com.databricks:spark-xml_2.13:0.18.0'
+    implementation 'com.github.houbb:opencc4j:1.8.1'
+}
+
+tasks.withType(JavaCompile){
+    options.encoding = "utf-8"
+}
+tasks.withType(Javadoc){
+    options.encoding = "utf-8"
+}
+
+test {
+    useJUnitPlatform()
+}
