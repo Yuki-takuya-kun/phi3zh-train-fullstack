@@ -19,11 +19,27 @@ import org.apache.spark.sql.Row;
 
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
 
 public class WikiCleaner extends AbstractCleaner {
 
-    private String wikiDataPath;
-    private String outputDir;
+    private String wikiDataPath; // the source datapath of the wikipedia
+    private String outputDir; // the output file path of the output
+    private static final Map<String, String> TAG_TRANSFORM_MAP = Stream.of(new String[][]{
+            {"span", ""},
+            {"em", ""},
+            {"strong", ""},
+            {"dfn", ""},
+            {"code", "`"},
+            {"div", ""},
+            {"nowiki", ""},
+            {"poem", ""},
+            {"syntaxhighlight", "```"},
+            {"source", "```"},
+            {"math", "$"}
+    }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+
     public WikiCleaner(String wikiDataPath,
                        String outputDir){
         this.wikiDataPath = wikiDataPath;
@@ -76,7 +92,9 @@ public class WikiCleaner extends AbstractCleaner {
      * */
     protected String CleanElement(String page){
         String res = "";
-        ArrayList<String> sectionBlocks = SplitBlocks(page);
+
+        page = MetaDataProcess(page);
+        ArrayList<Pair<String, String>> chapters = SplitWithChapters(page);
         Stack<Pair<String, Integer>> blockStack = new Stack<>();
 
         for (int i = 0; i < sectionBlocks.size(); i++){
@@ -100,27 +118,160 @@ public class WikiCleaner extends AbstractCleaner {
     }
 
     public String test(String page){ return CleanElement(page);}
+
+
     /**
-     * Split the page text into many blocks with section
+     * Split the page text into many blocks with chapter, according the first level heading
      * @param page the page to split
+     * @return the List of Pair contains the each chapter title and its content
      */
-    private ArrayList<String> SplitBlocks(String page){
-        String block = "";
-        ArrayList<String> res = new ArrayList<>();
-        for (String line: page.split("\n")){
-            if (!IsTitle(line)){
-                block = block + line + "\n";
-            }
-            else {
-                res.add(block);
-                block = line + "\n";
-            }
+    private ArrayList<Pair<String, String>> SplitWithChapters(String page){
+        Pattern firstHeadingPattern = Pattern.compile("==[^=]*==");
+        Matcher firstHeadingMatcher = firstHeadingPattern.matcher(page);
+        ArrayList<Pair<String, String>> chapters = new ArrayList<>();
+        String title = ""; // the title of each chapter
+        String content = ""; // the content of each chapter
+        int lastEnd = 0;
+
+        while (firstHeadingMatcher.find()){
+            content = page.substring(lastEnd, firstHeadingMatcher.start());
+            chapters.add(Pair.of(title, content));
+            title = page.substring(firstHeadingMatcher.start(), firstHeadingMatcher.end()).trim();
+            lastEnd = firstHeadingMatcher.end();
         }
-        if (block.length() > 0){
-            res.add(block);
-        }
-        return res;
+        chapters.add(Pair.of(title, page.substring(firstHeadingMatcher.end())));
+
+        return chapters;
     }
+
+    /**
+     * get the meta information of the page, such as transform group
+     * @param page the first chapter that contains the meta information
+     */
+    private String MetaDataProcess(String page){
+        // get transform group
+        Pattern transformGroupPattern = Pattern.compile("\\{\\{NoteTA.*?\\}\\}");
+        Matcher transformGroupMatcher = transformGroupPattern.matcher(page);
+        // the pattern that start with the sequence, such as 2=
+        Pattern transformListPrefix = Pattern.compile("^\\d+=");
+        Pattern publicTransformPrefix = Pattern.compile("^G\\d+=");
+        Pattern desTransformPrefix = Pattern.compile("^d\\d+=");
+
+        if (transformGroupMatcher.find()){
+            Map<String, String> wordMap = new HashMap<>(); // the map that map the word to a target word
+            page = page.substring(0, transformGroupMatcher.start()) + page.substring(transformGroupMatcher.end());
+            String transformGroup = transformGroupMatcher.group().replaceAll("\\s+", "");
+            String[] groups = transformGroup.split("|");
+            // iterate every group, the first element is {{NoteTA element, ignore it
+            for (int i = 1; i < groups.length; i++){
+                // reset the last element, which include }}
+                if (i == groups.length-1){
+                    groups[i] = groups[i].replace("}}", "").replace("\n", "");
+                }
+                // if the group is start with description or belongs to public transform group, ignore it
+                if (publicTransformPrefix.matcher(groups[i]).find() || desTransformPrefix.matcher(groups[i]).find()){
+                    continue;
+                }
+                else{
+                    // if the group is start with order, discard it
+                    if (transformListPrefix.matcher(groups[i]).find()){
+                        groups[i] = groups[i].substring(transformListPrefix.matcher(groups[i]).end());
+                    }
+                    String[] words = groups[i].split(";");
+                    String tagetWord = "";
+                    Map<String, String> langWordMap = new HashMap<>();
+                    for (String word: words){
+                        // if it is a on way transformation
+                        if (word.contains("=>")){
+                            String[] transWords = word.split("=>");
+                            String sourceWord = transWords[0];
+                            String[] langTarget = transWords[1].split(":");
+                            // if the target language is zh-cn, then add it to mapper directly
+                            if (langTarget[0].equals("zh-cn")){
+                                page = page.replace(sourceWord, langTarget[1]);
+                            }
+                        } else if (word.contains(":")) {
+                            String[] langWords = word.split(":"); // the first elem is lang like zh-cn
+                            langWordMap.put(langWords[0], langWords[1]);
+                        }
+                        // ignore other situation
+                    }
+                    // add the transformation into wordMap
+                    if (langWordMap.containsKey("zh-cn")){
+                        for (Map.Entry<String, String> entry: langWordMap.entrySet()){
+                            if (entry.getKey() != "zh-cn"){
+                                page = page.replace(entry.getKey(), langWordMap.get("zh-cn"));
+                            }
+                        }
+                    }
+
+                }
+            }
+        }
+        return page;
+    }
+
+
+    /**
+     * Parse the xml tag and transfer or delete it, for example discard <tag> and conserve <code> tag content
+     * @param text
+     * @return the text that modified
+     */
+    private String XMLParse(String text){
+        int skip = 0;
+        Pattern markupPattern = Pattern.compile("<[^<]*?>");
+        Pattern markupEndPattern = Pattern.compile("</[^<]*?>");
+        Pattern singlePattern = Pattern.compile("<[^>]*?/>");
+        //Pattern commentPattern = Pattern.compile("<!--.*-->");
+        Matcher markupMatcher = markupPattern.matcher(text);
+        Stack<Pair<String, Pair<Integer, Integer>>> beginsStack = new Stack<>();
+
+        while (markupMatcher.find()){
+            // skip the nested times for each time, because in every time the text will be updated
+            if (skip < beginsStack.size()){
+                skip ++;
+                continue;
+            }
+            skip = 0;
+            if (singlePattern.matcher(markupMatcher.group()).matches()){
+                // currently could not find the single pattern that should be reserved
+                text = text.substring(0, markupMatcher.start()) + text.substring(markupMatcher.end());
+            }
+            // if the pattern is the end markup then process the inter content
+            else if (markupEndPattern.matcher(markupMatcher.group()).matches()){
+                Pair<String, Pair<Integer, Integer>> beginMarkup = beginsStack.pop();
+                Pair<Integer, Integer> beginMarkupSpan = beginMarkup.getRight();
+                String beginMarkupContent = beginMarkup.getLeft();
+                String tag = beginMarkupContent.split("\\s+")[0];
+                // save and add the tag for markdown
+                if (this.TAG_TRANSFORM_MAP.containsKey(tag)){
+                    text = text.substring(0, beginMarkupSpan.getLeft())
+                            + this.TAG_TRANSFORM_MAP.get(tag) + text.substring(beginMarkupSpan.getRight(), markupMatcher.start())
+                            + text.substring(markupMatcher.end()) + this.TAG_TRANSFORM_MAP.get(tag);
+                }
+                // else discard the content
+                else {
+                    text = text.substring(0, beginMarkupSpan.getLeft()) + text.substring(markupMatcher.end());
+                }
+            }
+
+            // reset the matcher
+            markupMatcher = markupPattern.matcher(text);
+        }
+        return text;
+    }
+
+
+    /**
+     * Parse the template tag in wikipedia with format of {{}}, many template should be conserve and other should
+     * be discard
+     * @param text the text that should be parse
+     * @return the text after parse
+     */
+    private String TemplateParse(String text){
+        Pattern templatePattern = Pattern.compile("\\{\\{[^\\{]*?\\}\\}");
+    }
+
 
     /**
      * Transfer the blocks content into cleaned format
