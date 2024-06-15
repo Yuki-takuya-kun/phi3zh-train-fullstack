@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- This file is the config file while using wikipedia cleaner
+ for getting content-->
+<configuration>
+    <language>
+        <!-- the language that the wikipedia -->
+        zh
+    </language>
+    <frequency>
+        <!-- the request frequency, the value of 6 means 6 seconds put a request-->
+        6
+    </frequency>
+    <title-num-per-request>
+        <!-- the title number per request -->
+        10
+    </title-num-per-request>
+
+</configuration>

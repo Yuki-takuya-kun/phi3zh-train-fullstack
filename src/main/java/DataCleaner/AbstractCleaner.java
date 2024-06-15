@@ -1,37 +1,60 @@
 package DataCleaner;
 
-import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
-import org.apache.spark.api.java.function.ForeachFunction;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.BlockingDeque;
 
-import java.io.Serializable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-abstract class AbstractCleaner implements Serializable {
+abstract class AbstractCleaner<T> {
 
-    protected Dataset<Row> data;
-    protected SparkSession sparkSession;
+    private volatile boolean gettingData = true;
+    protected int maxDequeSize = Integer.MAX_VALUE;
+    protected volatile BlockingDeque<T> data;
 
-    abstract protected void ProcessRow(Row row);
-
-    // Input the dataset iterator and return the output iterator of the cleaned data
-    public void Clean(){
-        RowFunction processFun = new RowFunction(this);
-        data.foreach(processFun);
-        this.sparkSession.close();
+    // use queue to process element
+    public void clean(){
+        this.data = new LinkedBlockingDeque<>(maxDequeSize);
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+        executorService.submit(() -> getDataThread());
+        executorService.submit(() -> cleanAndSaveDataThread());
+        executorService.shutdown();
     }
 
-    public static class RowFunction implements ForeachFunction<Row>, Serializable {
+    protected abstract T cleanElement(T element);
 
-        private final AbstractCleaner abstractCleaner;
 
-        public RowFunction(AbstractCleaner abstractCleaner){
-            this.abstractCleaner = abstractCleaner;
+    /**
+     * this function is going the preprocess the dataset
+     */
+    protected abstract void getElements();
+
+    /**
+     * this function is going to process each element after clean
+     * @param element the element that after clean
+     */
+    protected abstract void saveElement(T element);
+
+    /**
+     * the thread function that getting data
+     */
+    private void getDataThread(){
+        this.gettingData = true;
+        getElements();
+        this.gettingData = false;
+    }
+
+
+    private void cleanAndSaveDataThread(){
+        while (gettingData || !this.data.isEmpty()){
+            if (!this.data.isEmpty()){
+                try{
+                    saveElement(cleanElement(this.data.take()));
+                } catch (InterruptedException e){
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
 
-        @Override
-        public void call(Row row) {
-            abstractCleaner.ProcessRow(row);
-        }
     }
 }
