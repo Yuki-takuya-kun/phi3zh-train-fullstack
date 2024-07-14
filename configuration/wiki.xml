@@ -10,9 +10,9 @@
         <!-- the request frequency, the value of 6 means 6 seconds put a request-->
         6
     </frequency>
-    <title-num-per-request>
+    <consumer-poll-nums>
         <!-- the title number per request -->
         10
-    </title-num-per-request>
+    </consumer-poll-nums>
 
 </configuration>
