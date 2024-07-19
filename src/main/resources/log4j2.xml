@@ -1,0 +1,30 @@
+<configuration status="WARN">
+    <Appenders>
+        <Console name="ConsoleAppender">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n  %msg%n"/>
+        </Console>
+        <File name="WikiInfoAppender" fileName="logs/wiki_info.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n  %msg%n"/>
+        </File>
+        <File name="WikiErrorAppender" fileName="logs/wiki_error.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n  %msg%n"/>
+        </File>
+        <File name="NetworkErrorAppender" fileName="logs/network_error.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n  %msg%n"/>
+        </File>
+    </Appenders>
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="ConsoleAppender"/>
+        </Root>
+        <Logger name="WikiInfoLogger" level="info" additivity="false">
+            <AppenderRef ref="WikiInfoAppender"/>
+        </Logger>
+        <Logger name="WikiErrorLogger" level="error" additivity="false">
+            <AppenderRef ref="WikiErrorAppender"/>
+        </Logger>
+        <Logger name="NetworkErrorLogger" level="error" additivity="false">
+            <AppenderRef ref="NetworkErrorAppender"/>
+        </Logger>
+    </Loggers>
+</configuration>

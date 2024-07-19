@@ -43,3 +43,6 @@ bin/
 
 ### output ###
 /output
+/test
+/testFiles
+/logs

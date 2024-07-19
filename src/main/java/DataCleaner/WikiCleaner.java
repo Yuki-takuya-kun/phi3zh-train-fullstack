@@ -15,8 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
+import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -33,6 +32,11 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import Common.Annotations.NetworkAnnotations.ExpBackoff;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.HttpGet;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -76,6 +80,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
 
     //private static final String apiUrl = "https://zh.wikipedia.org/api/rest_v1/transform/wikitext/to/html";
     private static final String apiUrl = "https://zh.wikipedia.org/w/api.php";
+    private static final String pageViewApiUrl = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/zh.wikipedia.org/all-access/user/%s/monthly/%s/%s";
     // the flag
 
     private static final int STARTSWITH = 1;
@@ -101,6 +106,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private static final Pattern CLASS_ATTR_PATTERN = Pattern.compile("class=\".*?\"");
     private static final Pattern TEMPLATE_PATTERN = Pattern.compile("\\{\\{.*?\\}\\}");
     private static final Pattern REDIRECT_PATTERN = Pattern.compile("#redirect|#重定向");
+    private static final Pattern LOW_QUAL_PATTERN = Pattern.compile("年|月|日");
 
     // html tag
     private static final String BOLD = "b";
@@ -186,10 +192,11 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     // configuration settings, with default values
     private int frequency = 6;
     private int consumerPollNums = 10;
+    private int accessThreshold = 100; // it means that in past year the article should be viewed at least accessThreshold times.
     private String language = "zh";
     private String bootstrapServers = "172.20.45.250:9092";
     private String topicName = "wikiCleaner";
-    private String configPath = "configuration/wiki.xml"; // the path of configuration file
+    private String configPath = "src/main/resources/wiki.xml"; // the path of configuration file
 
     private SparkSession sparkSession;
     private boolean TEST = false;
@@ -201,7 +208,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
 
     private static final Logger infoLogger = LogManager.getLogger("WikiInfoLogger");
     private static final Logger errorLogger = LogManager.getLogger("WikiErrorLogger");
-
 
     public WikiCleaner(String wikiDataPath,
                        String outputDir,
@@ -286,88 +292,83 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
 
     @Override
     protected Collection<Pair<String, String>> cleanElements(Collection<Pair<String, String>> elements) {
-        List<Pair<String, String>> res = elements.parallelStream().map((elem) -> {
-            String title = elem.getLeft();
-            String page = elem.getRight();
-            String corpus = "";
-            int retryTime = 0;
-            // Exponential backoff
-            while (retryTime < this.maxRetry){
-                try (CloseableHttpClient client = HttpClients.createDefault()){
-                    TimeUnit.SECONDS.sleep(1*(long)Math.pow(2, retryTime));
-                    HttpPost httpPost = new HttpPost(this.apiUrl);
-                    JsonObject postBody = new JsonObject();
-                    postBody.addProperty("action", "parse");
-                    postBody.addProperty("format", "json");
-                    postBody.addProperty("contentmodel", "wikitext");
-                    postBody.addProperty("prop", "text");
-                    postBody.addProperty("text", page);
-                    String body = postBody.entrySet().stream().map(
-                            entry -> {
-                                try {
-                                    return entry.getKey() + "=" + URLEncoder.encode(entry.getValue().getAsString(), "UTF8");
-                                } catch (Exception e){
-                                    return entry.getKey() + "=" + entry.getValue().getAsString();
-                                }
-                            }
-                    ).collect(Collectors.joining("&"));
-                    httpPost.setEntity(new StringEntity(body, "application/x-www-form-urlencoded", "UTF-8"));
-
-                    // post the data to wikipedia
-                    CloseableHttpResponse response = client.execute(httpPost);
-                    response.getStatusLine().getStatusCode();
-                    HttpEntity responseEntity = response.getEntity();
-
-                    if (responseEntity != null){
-                        String htmlPageJsonStr = EntityUtils.toString(responseEntity, StandardCharsets.UTF_8);
-                        JsonObject htmlPageJson = JsonParser.parseString(htmlPageJsonStr).getAsJsonObject();
-                        // error process
-                        if (htmlPageJson.has("error")){
-                            if (htmlPageJson.get("error").getAsJsonObject()
-                                    .get("code").getAsString().equals("ratelimited")){
-                                retryTime ++;
-                                continue;
-                            } else {
-                                String errorMessage = htmlPageJson.get("error").getAsJsonObject()
-                                        .get("info").getAsString();
-                                errorMessage = "error from wikipedia api: \n" + errorMessage;
-                                writeErrorLog(title, errorMessage);
-                                break;
-                            }
-                        } else {
-                            String htmlPage = htmlPageJson
-                                    .get("parse").getAsJsonObject()
-                                    .get("text").getAsJsonObject()
-                                    .get("*").getAsString();
-                            htmlPage = htmlPage.replace("\n", "");
-                            if (this.TEST){
-                                Path htmlDir = Paths.get(this.outputDir, "html_pages");
-                                Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
-                            }
-                            //htmlPage = StringEscapeUtils.unescapeJava(htmlPage);
-                            if (this.TEST){
-                                Path htmlDir = Paths.get(this.outputDir, "html_pages");
-                                Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
-                            }
-                            corpus = cleanWikiHtml(htmlPage);
-                            corpus = ZhConverterUtil.toSimple(corpus);
-                        }
-                    }
-                } catch (Exception e){
-                    if ((e instanceof SSLHandshakeException || e instanceof SSLPeerUnverifiedException
-                        || e instanceof UnknownHostException)
-                            && retryTime < this.maxRetry-1){
-                        retryTime ++;
-                        continue;
-                    } else {
-                        writeErrorLog(title, e);
-                    }
-                }
-                return Pair.of(title, corpus);
+        List<Pair<String, String>> res = elements.parallelStream().map((elem) ->{
+            try {
+                return wikitextToHtml(elem);
+            } catch (Exception e){
+                String title = elem.getLeft();
+                writeErrorLog(title, e);
             }
             return Pair.of("", "");
         }).collect(Collectors.toList());
         return res;
+    }
+
+    @ExpBackoff(loggerName = "WikiErrorLogger")
+    private Pair<String, String> wikitextToHtml(Pair<String, String> elem) throws Exception{
+        String title = elem.getLeft();
+        String page = elem.getRight();
+        String corpus = "";
+        try (CloseableHttpClient client = HttpClients.createDefault()){
+            HttpPost httpPost = new HttpPost(this.apiUrl);
+            JsonObject postBody = new JsonObject();
+            postBody.addProperty("action", "parse");
+            postBody.addProperty("format", "json");
+            postBody.addProperty("contentmodel", "wikitext");
+            postBody.addProperty("prop", "text");
+            postBody.addProperty("text", page);
+            String body = postBody.entrySet().stream().map(
+                    entry -> {
+                        try {
+                            return entry.getKey() + "=" + URLEncoder.encode(entry.getValue().getAsString(), "UTF8");
+                        } catch (Exception e){
+                            return entry.getKey() + "=" + entry.getValue().getAsString();
+                        }
+                    }
+            ).collect(Collectors.joining("&"));
+            httpPost.setEntity(new StringEntity(body, "application/x-www-form-urlencoded", "UTF-8"));
+
+            // post the data to wikipedia
+            CloseableHttpResponse response = client.execute(httpPost);
+            response.getStatusLine().getStatusCode();
+            HttpEntity responseEntity = response.getEntity();
+
+            if (responseEntity != null){
+                String htmlPageJsonStr = EntityUtils.toString(responseEntity, StandardCharsets.UTF_8);
+                JsonObject htmlPageJson = JsonParser.parseString(htmlPageJsonStr).getAsJsonObject();
+                // error process
+                if (htmlPageJson.has("error")){
+                    if (htmlPageJson.get("error").getAsJsonObject()
+                            .get("code").getAsString().equals("ratelimited")){
+                    } else {
+                        String errorMessage = htmlPageJson.get("error").getAsJsonObject()
+                                .get("info").getAsString();
+                        errorMessage = "error from wikipedia api: \n" + errorMessage;
+                        writeErrorLog(title, errorMessage);
+                    }
+                } else {
+                    String htmlPage = htmlPageJson
+                            .get("parse").getAsJsonObject()
+                            .get("text").getAsJsonObject()
+                            .get("*").getAsString();
+                    htmlPage = htmlPage.replace("\n", "");
+                    if (this.TEST){
+                        Path htmlDir = Paths.get(this.outputDir, "html_pages");
+                        Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
+                    }
+                    //htmlPage = StringEscapeUtils.unescapeJava(htmlPage);
+                    if (this.TEST){
+                        Path htmlDir = Paths.get(this.outputDir, "html_pages");
+                        Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
+                    }
+                    corpus = cleanWikiHtml(htmlPage);
+                    corpus = ZhConverterUtil.toSimple(corpus);
+                }
+            }
+            return Pair.of(title, corpus);
+        } catch (Exception e){
+            throw e;
+        }
     }
 
     @Override
@@ -840,6 +841,39 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
      */
     private void messageAlarm(){
 
+    }
+
+    private boolean isHighQualText(String title, String text){
+        try {
+            int totalView = getViewNum(title);
+        } catch (Exception e){
+
+        }
+
+        return false;
+    }
+
+    @ExpBackoff(loggerName = "WikiErrorLogger")
+    private int getViewNum(String title) throws Exception{
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("YYYYMMDD");
+        String rightNowDate = LocalDate.now().format(formatter);
+        String lastYearDate = LocalDate.now().minusYears(1).format(formatter);
+        String accessURL = String.format("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/zh.wikipedia.org/all-access/user/%s/monthly/%s/%s",
+                title, lastYearDate, rightNowDate);
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            HttpGet request = new HttpGet(accessURL);
+            HttpResponse response = client.execute(request);
+            if (response.getStatusLine().getStatusCode() == 200){
+                String jsonResponse = EntityUtils.toString(response.getEntity());
+                JsonArray results = JsonParser.parseString(jsonResponse).getAsJsonObject().getAsJsonArray("items");
+                int totalViews = StreamSupport.stream(results.spliterator(), true)
+                        .mapToInt(item->item.getAsJsonObject().get("views").getAsInt()).sum();
+                return totalViews;
+            }
+        } catch (Exception e){
+            throw e;
+        }
+        return 0;
     }
 
     /***
