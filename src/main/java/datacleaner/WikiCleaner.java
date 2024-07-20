@@ -4,16 +4,13 @@
 * Version: v0.0.1
 * */
 
-package DataCleaner;
+package datacleaner;
 
-import java.io.File;
 import java.net.URLEncoder;
-import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -27,14 +24,12 @@ import java.util.*;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
-import javax.net.ssl.SSLHandshakeException;
-import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.rmi.CORBA.Util;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
-import Common.Annotations.NetworkAnnotations.ExpBackoff;
+import common.annotations.networkannotations.ExpBackoff;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.logging.log4j.LogManager;
@@ -43,7 +38,6 @@ import org.apache.logging.log4j.Logger;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.commons.lang3.tuple.ImmutableTriple;
-import org.apache.commons.text.StringEscapeUtils;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
@@ -74,6 +68,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
 import java.util.stream.StreamSupport;
+import common.kafka.Utils;
 
 
 public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
@@ -192,7 +187,9 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     // configuration settings, with default values
     private int frequency = 6;
     private int consumerPollNums = 10;
-    private int accessThreshold = 100; // it means that in past year the article should be viewed at least accessThreshold times.
+    private int viewThreshold = 10000; // it means that in past year the article should be viewed at least accessThreshold times.
+    private int lengthThreshold = 500;
+    private int maxKafkaDataSize = 100;
     private String language = "zh";
     private String bootstrapServers = "172.20.45.250:9092";
     private String topicName = "wikiCleaner";
@@ -204,6 +201,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private String wikiDataPath; // the source datapath of the wikipedia
     private String outputDir; // the output file path of the output
     private Dataset<Row> data; // the wikipedia dataset
+    private transient AdminClient adminClient;
     private transient Consumer<String, String> consumer;
 
     private static final Logger infoLogger = LogManager.getLogger("WikiInfoLogger");
@@ -238,6 +236,10 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     protected void produceElements(){
 
         this.data.foreachPartition(iterator -> {
+            // if the size is larger than the threshold, then wait it until it less than threshold
+            while (Utils.dataSizeInTopic(this.adminClient, this.topicName) > this.maxKafkaDataSize){
+                TimeUnit.SECONDS.sleep(10);
+            }
             Properties producerProperties = new Properties();
             producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
             producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
@@ -846,6 +848,12 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private boolean isHighQualText(String title, String text){
         try {
             int totalView = getViewNum(title);
+            if (totalView < viewThreshold){
+                return false;
+            }
+            int textLength = text.replaceAll("\\s", "").length();
+
+            return true;
         } catch (Exception e){
 
         }
@@ -882,7 +890,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private void createKafka(){
         Properties adminConfig = new Properties();
         adminConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
-        AdminClient adminClient = AdminClient.create(adminConfig);
+        this.adminClient = AdminClient.create(adminConfig);
         try {
             // if the topics not in the kafka, then create it, if has delete and create it
             if (adminClient.listTopics().names().get().contains(this.topicName)){

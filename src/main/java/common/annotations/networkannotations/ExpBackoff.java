@@ -1,4 +1,4 @@
-package Common.Annotations.NetworkAnnotations;
+package common.annotations.networkannotations;
 
 
 import javax.net.ssl.SSLHandshakeException;
