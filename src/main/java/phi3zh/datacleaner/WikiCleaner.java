@@ -4,7 +4,7 @@
 * Version: v0.0.1
 * */
 
-package datacleaner;
+package phi3zh.datacleaner;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -24,11 +24,11 @@ import java.util.*;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
-import javax.rmi.CORBA.Util;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
-import common.annotations.networkannotations.ExpBackoff;
+import org.springframework.beans.factory.annotation.Autowired;
+import phi3zh.common.annotations.network.ExpBackoff;
 import com.google.gson.JsonArray;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
@@ -68,8 +68,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
 import java.util.stream.StreamSupport;
-import common.kafka.Utils;
-
+import phi3zh.common.kafka.Utils;
 
 public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
 
@@ -207,6 +206,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private static final Logger infoLogger = LogManager.getLogger("WikiInfoLogger");
     private static final Logger errorLogger = LogManager.getLogger("WikiErrorLogger");
 
+    @Autowired
     public WikiCleaner(String wikiDataPath,
                        String outputDir,
                        int maxDequeSize,
@@ -215,6 +215,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         this.outputDir = outputDir;
         this.maxDequeSize = maxDequeSize;
         this.useCache = useCache;
+        parallel = true;
 
         // load configuration files
         LoadConfiguration();
@@ -237,9 +238,9 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
 
         this.data.foreachPartition(iterator -> {
             // if the size is larger than the threshold, then wait it until it less than threshold
-            while (Utils.dataSizeInTopic(this.adminClient, this.topicName) > this.maxKafkaDataSize){
-                TimeUnit.SECONDS.sleep(10);
-            }
+//            while (Utils.dataSizeInTopic(this.bootstrapServers, this.topicName) > this.maxKafkaDataSize){
+//                TimeUnit.SECONDS.sleep(10);
+//            }
             Properties producerProperties = new Properties();
             producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
             producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
@@ -250,33 +251,38 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             while (iterator.hasNext()){
                 Row row = iterator.next();
                 String title = row.getAs(0).toString();
-                title = ZhConverterUtil.toSimple(title).replace("/", "_");
                 //String content = row.getAs(1).toString();
                 Row tmp = row.getAs(1);
                 String content = tmp.getString(0);
                 // remove the 'wikipedia:' 'help:' pages and redirect pages
                 if (title != null && content != null && !title.contains(":") &&
-                        !isRedirectPage(content)){
+                        !isRedirectPage(content) ){
                     // conver title and content to simple chinese
                     try {
-                        if (this.TEST || !this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, title))){
-                            Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, title + ".txt"),
+                        if (this.TEST || !this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(title)))){
+                            Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
                                     content.getBytes(StandardCharsets.UTF_8));
-
                             content = cleanWikitext(content);
-                            Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, title + ".txt"),
-                                    content.getBytes(StandardCharsets.UTF_8));
-                            ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, content);
-                            producer.send(record);
+                            if (isHighQualText(title, content)){
+                                Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, titleToFileName(title)),
+                                        content.getBytes(StandardCharsets.UTF_8));
+                                infoLogger.info(String.format("add page %s to kafka", title));
+                                ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, content);
+                                producer.send(record);
+                            } else {
+                                infoLogger.info(String.format("ignore page %s for its low quality", title));
+                            }
+                        } else {
+                            infoLogger.info(String.format("ignore page %s for it has been in output directory", title));
                         }
-
                     } catch (Exception e){
                         writeErrorLog(title, e);
                     }
+                } else {
+                    infoLogger.info(String.format("ignore page %s for it is not the target page that should be consider.", title));
                 }
             }
         });
-        System.out.println("produce element ends");
     }
 
     /**
@@ -306,7 +312,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         return res;
     }
 
-    @ExpBackoff(loggerName = "WikiErrorLogger")
+    @ExpBackoff
     private Pair<String, String> wikitextToHtml(Pair<String, String> elem) throws Exception{
         String title = elem.getLeft();
         String page = elem.getRight();
@@ -369,6 +375,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             }
             return Pair.of(title, corpus);
         } catch (Exception e){
+            writeErrorLog(title, e);
             throw e;
         }
     }
@@ -377,11 +384,11 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     protected void saveElements(Collection<Pair<String, String>> element) {
         for (Pair<String, String> elem: element){
             try {
-                System.out.println(elem.getLeft());
                 if (elem.getRight().trim().length() > 0){
-                    Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, elem.getLeft() + ".txt"),
+                    Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(elem.getLeft())),
                             elem.getRight().getBytes(StandardCharsets.UTF_8));
                 }
+                this.infoLogger.info(String.format("save page %s to file", elem.getLeft()));
             } catch (Exception e){
                 e.printStackTrace();
                 System.exit(1);
@@ -712,6 +719,11 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         }
     }
 
+    private String titleToFileName(String title){
+        title = title.replaceAll("<|>|:|\"|/|\\|\\||\\?|\\*", "_");
+        return title + ".txt";
+    }
+
     // assert the link should be delete or not
     private boolean shouleDeleteLink(String link){
         for (String key: this.linkDiscard.keySet()){
@@ -838,13 +850,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         }
     }
 
-    /**
-     * calculate the size in the message in the kafka and set block flag while it reach a threshold
-     */
-    private void messageAlarm(){
-
-    }
-
     private boolean isHighQualText(String title, String text){
         try {
             int totalView = getViewNum(title);
@@ -852,20 +857,24 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 return false;
             }
             int textLength = text.replaceAll("\\s", "").length();
-
+            if (textLength < lengthThreshold){
+                return false;
+            }
             return true;
         } catch (Exception e){
-
+            e.printStackTrace();
+            System.exit(1);
         }
 
         return false;
     }
 
-    @ExpBackoff(loggerName = "WikiErrorLogger")
+    @ExpBackoff
     private int getViewNum(String title) throws Exception{
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("YYYYMMDD");
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("YYYYMMdd");
         String rightNowDate = LocalDate.now().format(formatter);
         String lastYearDate = LocalDate.now().minusYears(1).format(formatter);
+        title = URLEncoder.encode(title, "utf-8");
         String accessURL = String.format("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/zh.wikipedia.org/all-access/user/%s/monthly/%s/%s",
                 title, lastYearDate, rightNowDate);
         try (CloseableHttpClient client = HttpClients.createDefault()) {
@@ -879,6 +888,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 return totalViews;
             }
         } catch (Exception e){
+            writeErrorLog(title, e);
             throw e;
         }
         return 0;

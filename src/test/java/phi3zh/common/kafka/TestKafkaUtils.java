@@ -1,4 +1,4 @@
-package kafka;
+package phi3zh.common.kafka;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -7,11 +7,10 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import scala.reflect.internal.Trees;
 
 import java.util.Collections;
 import java.util.Properties;
-import common.kafka.Utils;
+import phi3zh.common.kafka.Utils;
 
 public class TestKafkaUtils {
 
@@ -35,7 +34,7 @@ public class TestKafkaUtils {
             for (int i = 0; i < 10; i++) {
                 ProducerRecord<String, String> record = new ProducerRecord<>(topicName, "key-" + i, "value-" + i);
                 producer.send(record).get();
-                long size = Utils.dataSizeInTopic(admin, topicName);
+                long size = Utils.dataSizeInTopic(bootstrapServers, topicName);
                 System.out.println(size);
             }
             props = new Properties();

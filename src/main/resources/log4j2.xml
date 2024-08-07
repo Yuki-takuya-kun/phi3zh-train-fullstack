@@ -12,6 +12,9 @@
         <File name="NetworkErrorAppender" fileName="logs/network_error.log">
             <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n  %msg%n"/>
         </File>
+        <File name="DeduplicatorAppender" fileName="logs/deduplicate_info.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %n %msg%n"/>
+        </File>
     </Appenders>
     <Loggers>
         <Root level="INFO">
@@ -26,5 +29,9 @@
         <Logger name="NetworkErrorLogger" level="error" additivity="false">
             <AppenderRef ref="NetworkErrorAppender"/>
         </Logger>
+        <Logger name="DeduplicatorLogger" level="info" additivity="false">
+            <AppenderRef ref="DeduplicatorAppender"/>
+        </Logger>
+
     </Loggers>
 </configuration>

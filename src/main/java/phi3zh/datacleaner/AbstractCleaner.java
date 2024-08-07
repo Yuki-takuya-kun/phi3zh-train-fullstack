@@ -1,4 +1,4 @@
-package datacleaner;
+package phi3zh.datacleaner;
 
 import java.io.Serializable;
 import java.util.Collection;
@@ -8,16 +8,23 @@ import java.util.concurrent.Executors;
 
 abstract class AbstractCleaner<T> implements Serializable {
 
-    private volatile boolean gettingData = true;
+    protected boolean parallel;
     protected int maxDequeSize = Integer.MAX_VALUE;
     protected int maxRetry = 5;
+    protected boolean end = true;
 
     // use queue to process element
     public void clean(){
         ExecutorService executorService = Executors.newFixedThreadPool(2);
-        executorService.submit(() -> getDataThread());
-        executorService.submit(() -> cleanAndSaveDataThread());
-        executorService.shutdown();
+        if (this.parallel){
+            executorService.submit(() -> getDataThread());
+            executorService.submit(() -> cleanAndSaveDataThread());
+            executorService.shutdown();
+        } else {
+            getDataThread();
+            cleanAndSaveDataThread();
+        }
+
     }
 
     /**
@@ -39,15 +46,11 @@ abstract class AbstractCleaner<T> implements Serializable {
      * the thread function that getting data
      */
     private void getDataThread(){
-        this.gettingData = true;
-        System.out.println("produce elements");
         produceElements();
     }
 
 
     private void cleanAndSaveDataThread(){
-        System.out.println("begin clean data");
-        boolean end = false;
         int retry = 0;
         while (!end){
             try {
