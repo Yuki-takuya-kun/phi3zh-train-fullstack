@@ -9,7 +9,6 @@ import java.util.concurrent.Executors;
 abstract class AbstractCleaner<T> implements Serializable {
 
     protected boolean parallel;
-    protected int maxDequeSize = Integer.MAX_VALUE;
     protected int maxRetry = 5;
     protected boolean end = true;
 

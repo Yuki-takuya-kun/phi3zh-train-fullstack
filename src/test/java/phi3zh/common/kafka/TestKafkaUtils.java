@@ -10,7 +10,6 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 
 import java.util.Collections;
 import java.util.Properties;
-import phi3zh.common.kafka.Utils;
 
 public class TestKafkaUtils {
 
@@ -34,7 +33,7 @@ public class TestKafkaUtils {
             for (int i = 0; i < 10; i++) {
                 ProducerRecord<String, String> record = new ProducerRecord<>(topicName, "key-" + i, "value-" + i);
                 producer.send(record).get();
-                long size = Utils.dataSizeInTopic(bootstrapServers, topicName);
+                long size = Utils.dataSizeInTopic(admin, topicName);
                 System.out.println(size);
             }
             props = new Properties();

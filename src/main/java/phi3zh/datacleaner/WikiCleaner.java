@@ -28,6 +28,8 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
 import phi3zh.common.annotations.network.ExpBackoff;
 import com.google.gson.JsonArray;
 import org.apache.http.HttpResponse;
@@ -75,8 +77,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     //private static final String apiUrl = "https://zh.wikipedia.org/api/rest_v1/transform/wikitext/to/html";
     private static final String apiUrl = "https://zh.wikipedia.org/w/api.php";
     private static final String pageViewApiUrl = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/zh.wikipedia.org/all-access/user/%s/monthly/%s/%s";
-    // the flag
-
+    // the flags
     private static final int STARTSWITH = 1;
     private static final int EQUALS = 2;
     private static final int CONTAINS = 3;
@@ -184,18 +185,14 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     }).collect(Collectors.toMap(data->(String) data[0], data->(Integer)data[1]));
 
     // configuration settings, with default values
-    private int frequency = 6;
     private int consumerPollNums = 10;
     private int viewThreshold = 10000; // it means that in past year the article should be viewed at least accessThreshold times.
     private int lengthThreshold = 500;
     private int maxKafkaDataSize = 100;
-    private String language = "zh";
-    private String bootstrapServers = "172.20.45.250:9092";
+    private String bootstrapServers;
     private String topicName = "wikiCleaner";
-    private String configPath = "src/main/resources/wiki.xml"; // the path of configuration file
 
     private SparkSession sparkSession;
-    private boolean TEST = false;
     private boolean useCache;
     private String wikiDataPath; // the source datapath of the wikipedia
     private String outputDir; // the output file path of the output
@@ -209,39 +206,29 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     @Autowired
     public WikiCleaner(String wikiDataPath,
                        String outputDir,
-                       int maxDequeSize,
+                       String bootstrapServers,
+                       int consumerPollNums,
                        boolean useCache){
         this.wikiDataPath = wikiDataPath;
         this.outputDir = outputDir;
-        this.maxDequeSize = maxDequeSize;
+        this.bootstrapServers = bootstrapServers;
+        this.consumerPollNums = consumerPollNums;
         this.useCache = useCache;
         parallel = true;
 
-        // load configuration files
-        LoadConfiguration();
-        Initialize();
-    }
-
-    public WikiCleaner(String wikiDataPath,
-                       String outputDir,
-                       boolean test){
-        this.wikiDataPath = wikiDataPath;
-        this.outputDir = outputDir;
-        this.TEST = true;
-
-        LoadConfiguration();
+        // load the dataset
         Initialize();
     }
 
     @Override
     protected void produceElements(){
-
         this.data.foreachPartition(iterator -> {
-            // if the size is larger than the threshold, then wait it until it less than threshold
-//            while (Utils.dataSizeInTopic(this.bootstrapServers, this.topicName) > this.maxKafkaDataSize){
-//                TimeUnit.SECONDS.sleep(10);
-//            }
+            // for each partition, we create a Kafka admin
+            Properties adminConfig = new Properties();
+            adminConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
+            AdminClient admin = AdminClient.create(adminConfig);
             Properties producerProperties = new Properties();
+
             producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
             producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                     StringSerializer.class.getName());
@@ -249,9 +236,12 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                     StringSerializer.class.getName());
             Producer<String, String> producer = new KafkaProducer<>(producerProperties);
             while (iterator.hasNext()){
+                // if the size is larger than the threshold, then wait it until it less than threshold
+                while (Utils.dataSizeInTopic(admin, this.topicName) > this.maxKafkaDataSize){
+                    TimeUnit.SECONDS.sleep(10);
+                }
                 Row row = iterator.next();
                 String title = row.getAs(0).toString();
-                //String content = row.getAs(1).toString();
                 Row tmp = row.getAs(1);
                 String content = tmp.getString(0);
                 // remove the 'wikipedia:' 'help:' pages and redirect pages
@@ -259,7 +249,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                         !isRedirectPage(content) ){
                     // conver title and content to simple chinese
                     try {
-                        if (this.TEST || !this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(title)))){
+                        if (!this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(title)))){
                             Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
                                     content.getBytes(StandardCharsets.UTF_8));
                             content = cleanWikitext(content);
@@ -360,15 +350,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                             .get("text").getAsJsonObject()
                             .get("*").getAsString();
                     htmlPage = htmlPage.replace("\n", "");
-                    if (this.TEST){
-                        Path htmlDir = Paths.get(this.outputDir, "html_pages");
-                        Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
-                    }
-                    //htmlPage = StringEscapeUtils.unescapeJava(htmlPage);
-                    if (this.TEST){
-                        Path htmlDir = Paths.get(this.outputDir, "html_pages");
-                        Files.write(Paths.get(htmlDir.toString(), "test.html"), htmlPage.getBytes(StandardCharsets.UTF_8));
-                    }
                     corpus = cleanWikiHtml(htmlPage);
                     corpus = ZhConverterUtil.toSimple(corpus);
                 }
@@ -397,26 +378,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     }
 
     /**
-     * Load the configuration file
-     */
-    private void LoadConfiguration(){
-        try {
-            DocumentBuilderFactory  factory = DocumentBuilderFactory.newInstance();
-            DocumentBuilder builder = factory.newDocumentBuilder();
-            Document config = builder.parse(this.configPath);
-
-            config.getDocumentElement().normalize();
-            this.language = config.getElementsByTagName("language").item(0).getTextContent().trim();
-            this.frequency = Integer.parseInt(config.getElementsByTagName("frequency").item(0).getTextContent().trim());
-            this.consumerPollNums = Integer.parseInt(config.getElementsByTagName("consumer-poll-nums").item(0)
-                    .getTextContent().trim());
-        } catch (Exception e){
-            e.printStackTrace();
-        }
-
-    }
-
-    /**
      * Initialize needed components, including sparksession and create kafka message queue
      */
     private void Initialize(){
@@ -428,39 +389,13 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 .config("spark.master", "local")
                 .getOrCreate();
 
-        // only valid when testing
-        if (!this.TEST){
-            Dataset<Row> data = sparkSession.read()
-                    .format("xml")
-                    .option("rowTag", "page")
-                    .load(this.wikiDataPath);
-            this.data = data.select("title", "revision.text");
-        } else {
-            String content = "";
-            try {
-                content = new String(Files.readAllBytes(Paths.get(this.wikiDataPath)), StandardCharsets.UTF_8);
-            } catch (Exception o){
-                o.printStackTrace();
-            }
-
-            List<Row> data = Arrays.asList(
-                    RowFactory.create("test_file", RowFactory.create(content))
-            );
-
-            // 定义Schema
-            StructType nested = new StructType(new StructField[]{
-                    DataTypes.createStructField("filed3", DataTypes.StringType, true)
-            });
-            StructType schema = new StructType(new StructField[]{
-                    DataTypes.createStructField("field1", DataTypes.StringType, false),
-                    DataTypes.createStructField("field2", nested, false)
-            });
-
-            //将Java对象列表转换为Dataset<Row>
-            this.data = this.sparkSession.createDataFrame(data, schema);
-        }
-
-        System.out.println("finish collections");
+        Dataset<Row> data = sparkSession.read()
+                .format("xml")
+                .option("rowTag", "page")
+                .load(this.wikiDataPath);
+        System.out.println("wikidata");
+        data.show();
+        this.data = data.select("title", "revision.text");
 
         createKafka();
 
