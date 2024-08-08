@@ -18,9 +18,10 @@ public class CleanerConfig {
     public WikiCleaner wikiCleanerPro(){
         String wikiDataPath = "E:\\Datasets\\wiki\\zhwiki-20240520-pages-articles.xml\\zhwiki-20240520-pages-articles.xml";
         String outputPath = "output";
-        boolean useCache = true;
+        String topicName = "wikiCleaner";
+        boolean useCache = false;
         int consumerPollNum = 10;
-        return new WikiCleaner(wikiDataPath, outputPath, this.bootStrapServers, consumerPollNum, useCache);
+        return new WikiCleaner(wikiDataPath, outputPath, topicName, this.bootStrapServers, consumerPollNum, useCache);
     }
 
     @Bean

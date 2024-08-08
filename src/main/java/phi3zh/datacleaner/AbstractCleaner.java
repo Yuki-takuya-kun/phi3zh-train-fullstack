@@ -1,8 +1,12 @@
 package phi3zh.datacleaner;
 
+import phi3zh.common.annotations.network.ExpBackoff;
+
 import java.io.Serializable;
 import java.util.Collection;
 
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -10,18 +14,18 @@ abstract class AbstractCleaner<T> implements Serializable {
 
     protected boolean parallel;
     protected int maxRetry = 5;
-    protected boolean end = true;
+    protected boolean end = false;
 
     // use queue to process element
     public void clean(){
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         if (this.parallel){
-            executorService.submit(() -> getDataThread());
-            executorService.submit(() -> cleanAndSaveDataThread());
+            executorService.submit(() -> produceElements());
+            executorService.submit(() -> consumeElements());
             executorService.shutdown();
         } else {
-            getDataThread();
-            cleanAndSaveDataThread();
+            produceElements();
+            consumeElements();
         }
 
     }
@@ -31,36 +35,5 @@ abstract class AbstractCleaner<T> implements Serializable {
      */
     protected abstract void produceElements();
 
-    protected abstract Collection<T> consumeElements();
-
-    protected abstract Collection<T> cleanElements(Collection<T> element);
-
-    /**
-     * this function is going to process each element after clean
-     * @param element the element that after clean
-     */
-    protected abstract void saveElements(Collection<T> element);
-
-    /**
-     * the thread function that getting data
-     */
-    private void getDataThread(){
-        produceElements();
-    }
-
-
-    private void cleanAndSaveDataThread(){
-        int retry = 0;
-        while (!end){
-            try {
-                saveElements(cleanElements(consumeElements()));
-            } catch (Exception e){
-                retry ++;
-                if (retry >= this.maxRetry){
-                    end = true;
-                }
-            }
-        }
-        //System.out.println("end clean data");
-    }
+    protected abstract void consumeElements();
 }

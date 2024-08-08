@@ -24,12 +24,7 @@ import java.util.*;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-import org.springframework.stereotype.Service;
 import phi3zh.common.annotations.network.ExpBackoff;
 import com.google.gson.JsonArray;
 import org.apache.http.HttpResponse;
@@ -50,12 +45,6 @@ import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
-
-import org.apache.spark.sql.RowFactory;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
-import org.w3c.dom.*;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
@@ -131,17 +120,26 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             {"Commonscat", EQUALS},
             {"wayback", EQUALS},
             {"NoteTag", EQUALS},
+            {"CJK-New-Char", EQUALS},
             {"-", EQUALS},
             {"STEM", EQUALS},
             {"Authority control", EQUALS},
             {"efn", EQUALS},
             {"r", EQUALS},
+            {"otheruses", EQUALS},
+            {"Redirect", STARTSWITH},
+            {"not", EQUALS},
+            {"About", EQUALS},
             {"sidebar", CONTAINS},
             {"navigation", CONTAINS},
             {"学科", CONTAINS},
             {"侧边栏", CONTAINS},
-            {"link", CONTAINS}
+            {"link", CONTAINS},
     }).collect(Collectors.toMap(data-> (String) data[0], data-> (Integer)data[1]));
+
+    private static final Map<String, Integer> templateConserveStart = Stream.of(new Object[][]{
+            {"NoteTA", EQUALS}
+    }).collect(Collectors.toMap(data-> (String) data[0], data->(Integer) data[1]));
 
     private static final Map<String, Integer> linkDiscard = Stream.of(new Object[][]{
             {"file:", STARTSWITH},
@@ -189,14 +187,15 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private int viewThreshold = 10000; // it means that in past year the article should be viewed at least accessThreshold times.
     private int lengthThreshold = 500;
     private int maxKafkaDataSize = 100;
-    private String bootstrapServers;
-    private String topicName = "wikiCleaner";
+    private int maxConsumeRetryTime = 10; // the max retry number that the conumser that requests.
 
+    private String bootstrapServers;
+    private String topicName;
     private SparkSession sparkSession;
     private boolean useCache;
     private String wikiDataPath; // the source datapath of the wikipedia
     private String outputDir; // the output file path of the output
-    private Dataset<Row> data; // the wikipedia dataset
+    public Dataset<Row> data; // the wikipedia dataset
     private transient AdminClient adminClient;
     private transient Consumer<String, String> consumer;
 
@@ -206,15 +205,18 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     @Autowired
     public WikiCleaner(String wikiDataPath,
                        String outputDir,
+                       String topicName,
                        String bootstrapServers,
                        int consumerPollNums,
                        boolean useCache){
         this.wikiDataPath = wikiDataPath;
         this.outputDir = outputDir;
+        this.topicName = topicName;
         this.bootstrapServers = bootstrapServers;
         this.consumerPollNums = consumerPollNums;
         this.useCache = useCache;
-        parallel = true;
+        parallel = false;
+        end = false;
 
         // load the dataset
         Initialize();
@@ -241,9 +243,8 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                     TimeUnit.SECONDS.sleep(10);
                 }
                 Row row = iterator.next();
-                String title = row.getAs(0).toString();
-                Row tmp = row.getAs(1);
-                String content = tmp.getString(0);
+                String title = row.getAs("title");
+                String content = ((Row) row.getAs("text")).getAs("_VALUE");
                 // remove the 'wikipedia:' 'help:' pages and redirect pages
                 if (title != null && content != null && !title.contains(":") &&
                         !isRedirectPage(content) ){
@@ -280,28 +281,44 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
      * @return
      */
     @Override
-    protected Collection<Pair<String, String>> consumeElements(){
-        ConsumerRecords<String, String> records = this.consumer.poll(Duration.ofSeconds(5));
-        List<Pair<String, String>> res = StreamSupport.stream(records.spliterator(), true)
-                .map(record -> Pair.of(record.key(), record.value()))
-                .collect(Collectors.toList());
-        return res;
+    protected void consumeElements(){
+        ConsumerIterator consumerIterator = new ConsumerIterator();
+        while (consumerIterator.hasNext()){
+            // get the iterators
+            Collection<Pair<String, String>> elements = consumerIterator.next();
+            // transfer the wikitext
+            List<Pair<String, String>> wikiHtmls = elements.parallelStream().map((elem) ->{
+                try {
+                    return wikitextToHtml(elem);
+                } catch (Exception e){
+                    String title = elem.getLeft();
+                    writeErrorLog(title, e);
+                }
+                return Pair.of("", "");
+            }).collect(Collectors.toList());
+
+            // save elements
+            wikiHtmls.parallelStream().forEach(elem -> {
+                try {
+                    if (elem.getRight().trim().length() > 0){
+                        Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(elem.getLeft())),
+                                elem.getRight().getBytes(StandardCharsets.UTF_8));
+                    }
+                    this.infoLogger.info(String.format("save page %s to file", elem.getLeft()));
+                } catch (Exception e){
+                    e.printStackTrace();
+                    System.exit(1);
+                }
+            });
+        }
     };
 
-    @Override
-    protected Collection<Pair<String, String>> cleanElements(Collection<Pair<String, String>> elements) {
-        List<Pair<String, String>> res = elements.parallelStream().map((elem) ->{
-            try {
-                return wikitextToHtml(elem);
-            } catch (Exception e){
-                String title = elem.getLeft();
-                writeErrorLog(title, e);
-            }
-            return Pair.of("", "");
-        }).collect(Collectors.toList());
-        return res;
-    }
-
+    /**
+     * transfer wikitext to html page and transfer the html to markdown format
+     * @param elem
+     * @return
+     * @throws Exception
+     */
     @ExpBackoff
     private Pair<String, String> wikitextToHtml(Pair<String, String> elem) throws Exception{
         String title = elem.getLeft();
@@ -361,28 +378,10 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         }
     }
 
-    @Override
-    protected void saveElements(Collection<Pair<String, String>> element) {
-        for (Pair<String, String> elem: element){
-            try {
-                if (elem.getRight().trim().length() > 0){
-                    Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(elem.getLeft())),
-                            elem.getRight().getBytes(StandardCharsets.UTF_8));
-                }
-                this.infoLogger.info(String.format("save page %s to file", elem.getLeft()));
-            } catch (Exception e){
-                e.printStackTrace();
-                System.exit(1);
-            }
-        }
-    }
-
     /**
      * Initialize needed components, including sparksession and create kafka message queue
      */
     private void Initialize(){
-        // load image file from the local image
-        System.out.println(String.format("collect pages from %s", this.wikiDataPath));
         // load spark only if no title file input
         this.sparkSession = SparkSession.builder()
                 .appName("wikiCleaner")
@@ -393,10 +392,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 .format("xml")
                 .option("rowTag", "page")
                 .load(this.wikiDataPath);
-        System.out.println("wikidata");
-        data.show();
         this.data = data.select("title", "revision.text");
-
         createKafka();
 
         // create directories
@@ -421,7 +417,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             e.printStackTrace();
             System.exit(1);
         }
-
     }
 
     /**
@@ -436,9 +431,13 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         page = page.replaceAll(String.join("|", removeRegs), "");
         Matcher bracketMatcher = this.BRACKET_PATTERN.matcher(page);
 
+
         Deque<Pair<String, Integer>> deque = new ArrayDeque<>();
         Stack<Pair<String, Integer>> refBlockBegin = new Stack<>();
         List<Pair<Integer, Integer>> delIntervals = new ArrayList<>();
+        boolean isPageTemplate = true;
+        int lastIdx = 0;
+        // 正文正式开始的标志是最外层括号前有非空字符
         while (bracketMatcher.find()){
             if (bracketMatcher.group().equals("{{") || bracketMatcher.group().equals("[[")){
                 deque.addLast(Pair.of(bracketMatcher.group(), bracketMatcher.start()));
@@ -448,6 +447,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 if (left == null){
                     continue;
                 }
+
                 String content = page.substring(left.getRight(), right.getRight()).toLowerCase();
                 if (left.getLeft().equals("[[")){
                     content = content.substring(2, content.length()-2).toLowerCase();
@@ -459,6 +459,18 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                     String templateName = content
                             .substring(2, content.length()-2)
                             .toLowerCase().split("\\|")[0].trim();
+                    // delete the begin pages
+                    if (deque.isEmpty() && isPageTemplate){
+                        if (page.substring(lastIdx, left.getRight()).replaceAll("\\s+", "").isEmpty()){
+                            if (!shouldConserveTemplateInBegin(templateName)){
+                                delIntervals.add(Pair.of(left.getRight(), right.getRight()));
+                            }
+                            lastIdx = right.getRight();
+                            continue;
+                        } else {
+                            isPageTemplate = false;
+                        }
+                    }
                     if (shouldDeleteTemplate(templateName)){
                         delIntervals.add(Pair.of(left.getRight(), right.getRight()));
                     }
@@ -548,6 +560,11 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         return res;
     }
 
+    /**
+     * clean the wiki html text into the markdown format.
+     * @param page the html page of the wiki
+     * @return the markdown format that has been cleaned
+     */
     private String cleanWikiHtml(String page){
         org.jsoup.nodes.Document wikiDoc = Jsoup.parse(page);
         Element root = wikiDoc.root();
@@ -555,7 +572,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         boolean forward = true; // denotes it is a forward or backward process
         while (root.childrenSize() > 0) {
             if (forward && !shouldDeleteTag(node)) {
-
                 if (this.TABLE_BEGIN_PATTERN.matcher(node.tagName()).matches()) {
                     node.text(parseList(node));
                     if (node.nextElementSibling() != null) {
@@ -576,7 +592,6 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                     }
                 }
             } else if (!forward) {
-
                 node.html(transferHtmlToMarkdown(node.tagName(), node.text()));
                 if (node.nextElementSibling() != null) {
                     forward = true;
@@ -682,6 +697,20 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             } else if (this.templateDiscard.get(key).equals(this.EQUALS) && templateName.equals(key.toLowerCase())){
                 return true;
             } else if (this.templateDiscard.get(key).equals(this.CONTAINS) && templateName.contains(key.toLowerCase())){
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // assert the template in the begin of the text should be conserver or not
+    private boolean shouldConserveTemplateInBegin(String templateName){
+        for (String key: this.templateConserveStart.keySet()){
+            if (this.templateConserveStart.get(key).equals(this.STARTSWITH) && templateName.startsWith(key.toLowerCase())){
+                return true;
+            } else if (this.templateConserveStart.get(key).equals(this.EQUALS) && templateName.equals(key.toLowerCase())){
+                return true;
+            } else if (this.templateConserveStart.get(key).equals(this.CONTAINS) && templateName.contains(key.toLowerCase())){
                 return true;
             }
         }
@@ -871,5 +900,35 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private void writeErrorLog(String title, String errorMessage){
         errorMessage = String.format("Error occur while processing %s:\n", title) + errorMessage;
         this.errorLogger.error(errorMessage);
+    }
+
+    private class ConsumerIterator implements Iterator<Collection<Pair<String, String>>>{
+
+        List<Pair<String, String>> cache = new ArrayList<>();
+
+        // extract the data first then return the hasNext, or if it runs with multiple processes, it will encounter
+        // many backwards
+        @Override
+        public boolean hasNext(){
+            int retryTime = 0;
+            this.cache.clear();
+            while (retryTime < WikiCleaner.this.maxConsumeRetryTime){
+                ConsumerRecords<String, String> records = WikiCleaner.this.consumer.poll(Duration.ofSeconds(5));
+                if (records.count() == 0){
+                    retryTime ++;
+                } else {
+                    this.cache = StreamSupport.stream(records.spliterator(), false)
+                            .map(record->Pair.of(record.key(), record.value()))
+                            .collect(Collectors.toList());
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public Collection<Pair<String, String>> next(){
+            return this.cache;
+        }
     }
 }

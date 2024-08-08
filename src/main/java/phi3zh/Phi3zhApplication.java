@@ -35,8 +35,8 @@ public class Phi3zhApplication {
     @Bean
     public CommandLineRunner commandLineRunner(ApplicationContext context){
         Map<String, Boolean> map = new HashMap<>();
-        map.put("cleaner", false);
-        map.put("deduplicator", true);
+        map.put("cleaner", true);
+        map.put("deduplicator", false);
         return args -> {
             if (map.get("cleaner")){
                 this.wikiCleaner.clean();

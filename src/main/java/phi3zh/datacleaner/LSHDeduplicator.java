@@ -2,7 +2,6 @@ package phi3zh.datacleaner;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.math3.util.Combinations;
-import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.api.java.function.MapFunction;
@@ -18,7 +17,6 @@ import phi3zh.datacleaner.blockers.ChapterBlocker;
 import scala.Tuple2;
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
-import scala.collection.mutable.ArraySeq;
 import scala.reflect.ClassTag$;
 
 import java.io.File;
@@ -265,7 +263,6 @@ public class LSHDeduplicator extends AbstractCleaner<Pair<String, String>>{
         Dataset<Row> blockIDDuplicated = verticesDf.join(connectedDuplicated, "ID"); // with ID and BlockID
 
         this.logger.info(String.format("After deduplicate, there has %d blocks remain.", blockIDDuplicated.count()));
-        //
         Dataset<Row> blockDuplicated = blockIDDuplicated.join(blockDf.select("BlockID", "BlockText"), "BlockID")
                 .select("BlockID", "BlockText");
 
@@ -306,19 +303,7 @@ public class LSHDeduplicator extends AbstractCleaner<Pair<String, String>>{
     }
 
     @Override
-    protected Collection<Pair<String, String>> consumeElements() {
-        return Collections.emptyList();
-    }
-
-    @Override
-    protected Collection<Pair<String, String>> cleanElements(Collection<Pair<String, String>> element) {
-        return Collections.emptyList();
-    }
-
-    @Override
-    protected void saveElements(Collection<Pair<String, String>> element) {
-
-    }
+    protected void consumeElements() {}
 
     private List<String> split2Ngrams(String inputText, int k){
         List<String> ngrams = new ArrayList<>();

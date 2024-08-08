@@ -19,11 +19,6 @@ public class TestWikiCleaner {
 
     @Test
     public void testSinglePage(){
-        try {
-            this.wikiCleaner.clean();
-        } catch (Exception e){
-            e.printStackTrace();
-            System.exit(1);
-        }
+        this.wikiCleaner.clean();
     }
 }
