@@ -42,8 +42,8 @@ bin/
 ### Mac OS ###
 .DS_Store
 
-### output ###
 /output
 /test
 /logs
 /logs-test
+/visio

@@ -32,6 +32,7 @@
         <Logger name="DeduplicatorLogger" level="info" additivity="false">
             <AppenderRef ref="DeduplicatorAppender"/>
         </Logger>
+        <Logger name="org.apache.http.client.protocol.ResponseProcessCookies" level="ERROR"/>
 
     </Loggers>
 </configuration>

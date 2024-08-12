@@ -11,8 +11,8 @@ import org.apache.spark.graphx.Edge;
 import org.apache.spark.graphx.Graph;
 import org.apache.spark.storage.StorageLevel;
 import org.springframework.beans.factory.annotation.Autowired;
-import phi3zh.common.Distance;
-import phi3zh.common.Hasher;
+import phi3zh.common.utils.Distance;
+import phi3zh.common.utils.Hasher;
 import phi3zh.datacleaner.blockers.ChapterBlocker;
 import scala.Tuple2;
 import scala.collection.JavaConverters;
@@ -67,7 +67,6 @@ public class LSHDeduplicator extends AbstractCleaner<Pair<String, String>>{
      */
     @Autowired
     public LSHDeduplicator(String dataDir, String outputDir, int p, double t, int k, int b, int r, int seed){
-        parallel = false;
         this.dataDir = dataDir;
         this.outputDir = outputDir;
         this.p = p;
@@ -77,7 +76,6 @@ public class LSHDeduplicator extends AbstractCleaner<Pair<String, String>>{
         this.r = r;
         assert b*r <= p;
         this.seed = seed;
-        this.end = true;
         this.spark = SparkSession.builder().appName("LSHDeduplicator")
                 .config("spark.master", "local")
                 .config("spark.driver.memory", "8g")

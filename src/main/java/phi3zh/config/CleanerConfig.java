@@ -1,35 +1,42 @@
 package phi3zh.config;
 
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.*;
 import phi3zh.datacleaner.LSHDeduplicator;
 import phi3zh.datacleaner.WikiCleaner;
 
 @Configuration
 public class CleanerConfig {
 
-    private String bootStrapServers = "172.20.45.250:9092";
+    private CommonConfig commonConfig;
+
+    @Autowired
+    public CleanerConfig(CommonConfig commonConfig){
+        this.commonConfig = commonConfig;
+    }
 
     @Bean
     @Profile("production")
     @Lazy
     public WikiCleaner wikiCleanerPro(){
         String wikiDataPath = "E:\\Datasets\\wiki\\zhwiki-20240520-pages-articles.xml\\zhwiki-20240520-pages-articles.xml";
-        String outputPath = "output";
+        //String wikiDataPath ="E://Datasets/phi3-zh/test/source_dataset/test.xml";
+        String outputPath = "E://Datasets/phi3-zh/output";
         String topicName = "wikiCleaner";
         boolean useCache = false;
+        boolean enableHighQualDetection = true;
         int consumerPollNum = 10;
-        return new WikiCleaner(wikiDataPath, outputPath, topicName, this.bootStrapServers, consumerPollNum, useCache);
+        return new WikiCleaner(wikiDataPath, outputPath, topicName,
+                this.commonConfig.getBootStrapServers(), consumerPollNum,
+                commonConfig.backoffMaxRetry, useCache, enableHighQualDetection);
     }
 
     @Bean
     @Profile("production")
     @Lazy
     public LSHDeduplicator lshDeduplicatorPro(){
-        String inputPath = "D://projects/phi3-zh/output/cleaned_corpus";
-        String outputPath = "output/lsh_output";
+        String inputPath = "E://Datasets/phi3-zh/output/cleaned_corpus";
+        String outputPath = "E://Datasets/output/lsh_output";
         int p = 4;
         double t = 0.6;
         int k = 3;

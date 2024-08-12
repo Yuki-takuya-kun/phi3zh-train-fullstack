@@ -1,11 +1,12 @@
 /*
- * WikiCleaner Class to get the dataset of wikiDataPath;
- *
- * Version: v0.0.1
- * */
+* WikiCleaner Class to get the dataset of wikiDataPath;
+*
+* Version: v0.0.1
+* */
 
 package phi3zh.datacleaner;
 
+import java.io.Serializable;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -27,42 +28,47 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import org.apache.commons.lang3.tuple.ImmutableTriple;
-import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.util.EntityUtils;
 import org.apache.kafka.clients.admin.*;
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
+import org.apache.spark.broadcast.Broadcast;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
-
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
 
 import com.github.houbb.opencc4j.util.ZhConverterUtil;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import phi3zh.common.utils.Backoff;
-import phi3zh.common.utils.Kafka;
 
 import java.util.stream.StreamSupport;
 
-public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
+import org.springframework.beans.factory.annotation.Autowired;
+import phi3zh.common.utils.Backoff;
+import phi3zh.common.utils.Kafka;
+import scala.reflect.ClassTag$;
+
+public class WikiCleaner extends AbstractCleaner<Pair<String, String>> implements Serializable{
 
     //private static final String apiUrl = "https://zh.wikipedia.org/api/rest_v1/transform/wikitext/to/html";
     private static final String apiUrl = "https://zh.wikipedia.org/w/api.php";
@@ -143,7 +149,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     }).collect(Collectors.toMap(data->(String)data[0], data->(Integer)data[1]));
 
     private static final List<String> tagDiscard = Stream.of(new String[]{
-            "meta", "title", "img", "style", "annotation", "table"
+        "meta", "title", "img", "style", "annotation", "table"
     }).collect(Collectors.toList());
 
     private static final List<String> classAttrDiscard = Stream.of(new String[]{
@@ -190,6 +196,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     private String bootstrapServers;
     private String topicName;
     private SparkSession sparkSession;
+    private SparkContext sparkContext;
     private boolean useCache;
     private boolean enableHighQualDetection;
     private String wikiDataPath; // the source datapath of the wikipedia
@@ -218,75 +225,90 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         this.backoffMaxRetry = backoffMaxRetry;
         this.useCache = useCache;
         this.enableHighQualDetection = enableHighQualDetection;
+        System.out.println("using cache:" + useCache);
         // load the dataset
         Initialize();
     }
 
     @Override
     protected void produceElements(){
+        Broadcast<String> broadcastBootstarpServers = sparkContext.broadcast(this.bootstrapServers,
+                ClassTag$.MODULE$.apply(String.class));
+        Broadcast<Boolean> broadcastUseCache = sparkContext.broadcast(this.useCache,
+                ClassTag$.MODULE$.apply(Boolean.class));
+
+        System.out.println("for each start");
         this.data.foreachPartition(iterator -> {
+            System.out.println("123456");
             // for each partition, we create a Kafka admin
             Properties adminConfig = new Properties();
-            adminConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
+            adminConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broadcastBootstarpServers.value());
             AdminClient admin = AdminClient.create(adminConfig);
             Properties producerProperties = new Properties();
-            producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, this.bootstrapServers);
+            producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broadcastBootstarpServers.value());
             producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                     StringSerializer.class.getName());
             producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
                     StringSerializer.class.getName());
             Producer<String, String> producer = new KafkaProducer<>(producerProperties);
             while (iterator.hasNext()){
+                System.out.println("producing has net");
                 Row row = iterator.next();
                 String title = row.getAs("title");
                 String content = ((Row) row.getAs("text")).getAs("_VALUE");
+                test();
                 // remove the 'wikipedia:' 'help:' pages and redirect pages
-                if (title != null && content != null && !title.contains(":") &&
-                        !isRedirectPage(content) ){
-                    // conver title and content to simple chinese
-                    try {
-                        if (!this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(title)))){
-                            String cleanedContent = cleanWikitext(content);
-                            if (this.enableHighQualDetection && isHighQualText(title, content) || !this.enableHighQualDetection){
-                                Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
-                                        content.getBytes(StandardCharsets.UTF_8));
-                                Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, titleToFileName(title)),
-                                        cleanedContent.getBytes(StandardCharsets.UTF_8));
-                                infoLogger.info(String.format("add page %s to Kafka", title));
-                                ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, cleanedContent);
-                                LocalDateTime now = LocalDateTime.now();
-                                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-                                String formattedDateTime = now.format(formatter);
-                                // if the size is larger than the threshold, then wait it until it less than threshold
-                                long count = Kafka.dataSizeUnConsume(admin, this.topicName, this.groupId);
-                                while ( count > this.maxKafkaDataSize){
-                                    TimeUnit.SECONDS.sleep(10);
-                                }
-                                System.out.println(formattedDateTime + "  There are " + count + " data in kafka");
-                                producer.send(record);
-                            }
-                            else {
-                                infoLogger.info(String.format("ignore page %s for its low quality", title));
-                            }
-                        }
-//                        else {
-//                            infoLogger.info(String.format("ignore page %s for it has been in output directory", title));
-//                        }
-                    } catch (Exception e){
-                        writeErrorLog(title, e);
-                    }
-                }
+//                if (title != null && content != null && !title.contains(":") &&
+//                        !isRedirectPage(content) ){
+////                    // conver title and content to simple chinese
+////                    try {
+////                        System.out.println(this.useCache);
+////                        if (!this.useCache || Files.notExists(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(title)))){
+////                            String cleanedContent = cleanWikitext(content);
+////                            if (this.enableHighQualDetection && isHighQualText(title, content) || !this.enableHighQualDetection){
+////                                Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
+////                                        content.getBytes(StandardCharsets.UTF_8));
+////                                Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, titleToFileName(title)),
+////                                        cleanedContent.getBytes(StandardCharsets.UTF_8));
+////                                infoLogger.info(String.format("add page %s to Kafka", title));
+////                                ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, cleanedContent);
+////                                LocalDateTime now = LocalDateTime.now();
+////                                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+////                                String formattedDateTime = now.format(formatter);
+////                                // if the size is larger than the threshold, then wait it until it less than threshold
+////                                long count = Kafka.dataSizeUnConsume(admin, this.topicName, this.groupId);
+////                                while ( count > this.maxKafkaDataSize){
+////                                    TimeUnit.SECONDS.sleep(10);
+////                                }
+////                                System.out.println(formattedDateTime + "  There are " + count + " data in kafka");
+////                                producer.send(record);
+////                            }
+////                            else {
+////                                infoLogger.info(String.format("ignore page %s for its low quality", title));
+////                            }
+////                        }
+//////                        else {
+//////                            infoLogger.info(String.format("ignore page %s for it has been in output directory", title));
+//////                        }
+////                    } catch (Exception e){
+////                        writeErrorLog(title, e);
+////                    }
+//                }
 //                else {
 //                    infoLogger.info(String.format("ignore page %s for it is not the target page that should be consider.", title));
 //                }
             }
-            // release the producer and admin
+//            // release the producer and admin
             producer.close();
             admin.close();
         });
+        System.out.println("for each end");
         this.isProduceEnd = true;
     }
 
+    private void test(){
+        System.out.println("it is a test function");
+    }
 
     /**
      * Consume the elemnents in the message queue, post the content to wikipedia and get the final outcome
@@ -294,39 +316,39 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
      */
     @Override
     protected void consumeElements(){
-        ConsumerIterator consumerIterator = new ConsumerIterator();
-        while (consumerIterator.hasNext()){
-            // get the data
-            Collection<Pair<String, String>> elements = consumerIterator.next();
-            // transfer the wikitext
-            List<Pair<String, String>> wikiHtmls = elements.parallelStream().map((elem) ->{
-                try {
-                    WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable(elem);
-                    Pair<String, String> htmlPage = Backoff.netExpBackoff(wikitextToHtmlCallable, this.backoffMaxRetry);
-                    //Pair<String, String> htmlPage = wikitextToHtml(elem);
-                    String cleanedPage = ZhConverterUtil.toSimple(cleanWikiHtml(htmlPage.getRight()));
-                    return Pair.of(htmlPage.getLeft(), cleanedPage);
-                } catch (Throwable e){
-                    String title = elem.getLeft();
-                    writeErrorLog(title, e);
-                }
-                return Pair.of("", "");
-            }).collect(Collectors.toList());
-
-            // save elements
-            wikiHtmls.parallelStream().forEach(elem -> {
-                try {
-                    if (elem.getRight().trim().length() > 0){
-                        Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(elem.getLeft())),
-                                elem.getRight().getBytes(StandardCharsets.UTF_8));
-                    }
-                    this.infoLogger.info(String.format("save page %s to file", elem.getLeft()));
-                } catch (Exception e){
-                    e.printStackTrace();
-                    System.exit(1);
-                }
-            });
-        }
+//        ConsumerIterator consumerIterator = new ConsumerIterator();
+//        while (consumerIterator.hasNext()){
+//            // get the data
+//            Collection<Pair<String, String>> elements = consumerIterator.next();
+//            // transfer the wikitext
+//            List<Pair<String, String>> wikiHtmls = elements.parallelStream().map((elem) ->{
+//                try {
+////                    WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable(elem);
+////                    Pair<String, String> htmlPage = Backoff.netExpBackoff(wikitextToHtmlCallable, this.backoffMaxRetry);
+//                    Pair<String, String> htmlPage = wikitextToHtml(elem);
+//                    String cleanedPage = ZhConverterUtil.toSimple(cleanWikiHtml(htmlPage.getRight()));
+//                    return Pair.of(htmlPage.getLeft(), cleanedPage);
+//                } catch (Throwable e){
+//                    String title = elem.getLeft();
+//                    writeErrorLog(title, e);
+//                }
+//                return Pair.of("", "");
+//            }).collect(Collectors.toList());
+//
+//            // save elements
+//            wikiHtmls.parallelStream().forEach(elem -> {
+//                try {
+//                    if (elem.getRight().trim().length() > 0){
+//                        Files.write(Paths.get(this.outputDir, this.CLEANED_CORPUS, titleToFileName(elem.getLeft())),
+//                                elem.getRight().getBytes(StandardCharsets.UTF_8));
+//                    }
+//                    this.infoLogger.info(String.format("save page %s to file", elem.getLeft()));
+//                } catch (Exception e){
+//                    e.printStackTrace();
+//                    System.exit(1);
+//                }
+//            });
+//        }
     }
 
     /**
@@ -338,6 +360,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                 .appName("wikiCleaner")
                 .config("spark.master", "local")
                 .getOrCreate();
+        this.sparkContext = sparkSession.sparkContext();
         Dataset<Row> data = sparkSession.read()
                 .format("xml")
                 .option("rowTag", "page")
@@ -369,17 +392,17 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         }
     }
 
-    private class GetViewNumCallable implements Callable<Integer> {
-        private String title;
-        public GetViewNumCallable(String title){
-            this.title = title;
-        }
-
-        @Override
-        public Integer call() throws Exception{
-            return getViewNum(this.title);
-        }
-    }
+//    private class GetViewNumCallable implements Callable<Integer>{
+//        private String title;
+//        public GetViewNumCallable(String title){
+//            this.title = title;
+//        }
+//
+//        @Override
+//        public Integer call() throws Exception{
+//            return getViewNum(this.title);
+//        }
+//    }
 
     /**
      * get the view number in the past year
@@ -412,17 +435,17 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     }
 
 
-    private class WikitextToHtmlCallable implements Callable<Pair<String, String>>{
-        private Pair<String, String> textNeedTransfer;
-        public WikitextToHtmlCallable(Pair<String, String> textNeedTransfer){
-            this.textNeedTransfer = textNeedTransfer;
-        }
-
-        @Override
-        public Pair<String, String> call() throws Exception{
-            return wikitextToHtml(this.textNeedTransfer);
-        }
-    }
+//    private class WikitextToHtmlCallable implements Callable<Pair<String, String>>{
+//        private Pair<String, String> textNeedTransfer;
+//        public WikitextToHtmlCallable(Pair<String, String> textNeedTransfer){
+//            this.textNeedTransfer = textNeedTransfer;
+//        }
+//
+//        @Override
+//        public Pair<String, String> call() throws Exception{
+//            return wikitextToHtml(this.textNeedTransfer);
+//        }
+//    }
 
     /**
      * transfer wikitext to html page and transfer the html to markdown format
@@ -588,7 +611,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         for (String line: stirngLines){
             if (line.replaceAll("\\s", "").
                     replaceAll("[\\p{P}&&[^}]]", "").length() > 0
-                    || !this.TEMPLATE_PATTERN.matcher(line.trim()).matches()){
+                || !this.TEMPLATE_PATTERN.matcher(line.trim()).matches()){
                 res = res + line + "\n";
             }
         }
@@ -616,7 +639,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
         }
 
         if (page.substring(chapterEnd).trim().length() > 0
-                && !shouldDeleteTitle(chapterTitle)){
+            && !shouldDeleteTitle(chapterTitle)){
             res = res + page.substring(chapterStart);
         }
 
@@ -832,7 +855,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
                     && title.contains(key)){
                 return true;
             } else if (this.titleDiscard.get(key).equals(this.EQUALS)
-                    && title.equals(key)){
+                && title.equals(key)){
                 return true;
             }
         }
@@ -894,10 +917,12 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
     }
 
     private boolean isHighQualText(String title, String text){
+        System.out.println("Asserting high quality");
         try {
-            GetViewNumCallable getViewNumCallable = new GetViewNumCallable(title);
-            int totalView = Backoff.netExpBackoff(getViewNumCallable, this.backoffMaxRetry);
-            //int totalView = getViewNum(title);
+//            GetViewNumCallable getViewNumCallable = new GetViewNumCallable(title);
+//            int totalView = Backoff.netExpBackoff(getViewNumCallable, this.backoffMaxRetry);
+            int totalView = getViewNum(title);
+            System.out.println("view num:" + totalView);
             if (totalView < viewThreshold){
                 return false;
             }
@@ -905,6 +930,7 @@ public class WikiCleaner extends AbstractCleaner<Pair<String, String>> {
             if (textLength < lengthThreshold){
                 return false;
             }
+            System.out.println(totalView);
             return true;
         } catch (Throwable e){
             e.printStackTrace();

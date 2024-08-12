@@ -27,6 +27,7 @@ public class Phi3zhApplication {
     }
 
     public static void main(String[] args){
+
         SpringApplication springApplication = new SpringApplication(Phi3zhApplication.class);
         springApplication.setAdditionalProfiles("production");
         springApplication.run(args);

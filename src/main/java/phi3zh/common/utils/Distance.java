@@ -1,4 +1,4 @@
-package phi3zh.common;
+package phi3zh.common.utils;
 
 import java.util.HashSet;
 import java.util.Set;
