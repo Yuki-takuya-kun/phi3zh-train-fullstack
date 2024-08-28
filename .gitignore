@@ -48,3 +48,4 @@ bin/
 /logs
 /logs-test
 /visio
+src/main/resources/tokenizer
