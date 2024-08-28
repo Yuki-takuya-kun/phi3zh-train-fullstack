@@ -2,6 +2,7 @@ package phi3zh.dataconverter.cleaner;
 
 import com.github.houbb.opencc4j.util.ZhConverterUtil;
 import org.apache.commons.lang3.tuple.ImmutableTriple;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.jsoup.Jsoup;
@@ -12,6 +13,7 @@ import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.Kafka;
 import phi3zh.config.WikihtmlCleanerConfig;
+import phi3zh.dataconverter.StreamConverter;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -26,7 +28,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-public class WikihtmlCleaner extends Cleaner<String> {
+public class WikihtmlCleaner extends StreamConverter<List<Pair<String, String>>> {
 
     private static final List<String> tagDiscard = Stream.of(new String[]{
             "meta", "title", "img", "style", "annotation", "table"
@@ -74,52 +76,62 @@ public class WikihtmlCleaner extends Cleaner<String> {
     String outputDir;
     String endBucketName;
     String resourceSemaphoreName;
-    List<String> redisServers;
     int pollNum;
     Config redisConfig;
+    Consumer consumer;
+    RedissonClient redissonClient;
 
     public WikihtmlCleaner(WikihtmlCleanerConfig config){
+        super(config.redisConfig(), config.endBucketName());
         this.bootstrapServers = config.kafkaServer();
         this.sourceTopic = config.sourceTopic();
         this.groupId = config.groupId();
         this.pollNum = config.pollNum();
         this.outputDir = config.outputDir();
-        this.redisServers = config.redisServers();
+        this.redisConfig = config.redisConfig();
         this.endBucketName = config.endBucketName();
         this.resourceSemaphoreName = config.resouceSemaphoreName();
-        redisConfig = new Config();
-        for (String address: redisServers){
-            redisConfig.useSingleServer().setAddress(address);
-        }
+
+        consumer = Kafka.getStringConsumer(bootstrapServers, groupId, Collections.singletonList(sourceTopic), pollNum);
+        redissonClient = Redisson.create(this.redisConfig);
     }
 
     @Override
-    public void run(){
-        Consumer consumer = Kafka.getStringConsumer(bootstrapServers, groupId, Collections.singletonList(sourceTopic), pollNum);
-        RedissonClient client = Redisson.create(this.redisConfig);
-        while (! (Boolean) client.getBucket(endBucketName).get()){
-            ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(5));
-            int recordCount = records.count();
-            System.out.println("getting element");
-            System.out.println(sourceTopic);
-            if (recordCount > 0){
-                System.out.println("get========="+recordCount);
+    protected List<Pair<String, String>> load(){
+        ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(5));
+        int recordCount = records.count();
+        redissonClient.getSemaphore(resourceSemaphoreName).release(recordCount);
+        List<Pair<String, String>> result = StreamSupport.stream(records.spliterator(), false)
+                .map(record->Pair.of(record.key(), record.value())).collect(Collectors.toList());
+        return result;
+    }
+
+    @Override
+    protected List<Pair<String, String>> process(List<Pair<String, String>> data){
+        return data.stream().map(elem -> {
+            String title = elem.getLeft();
+            String page = elem.getRight();
+            page = clean(page);
+            page = ZhConverterUtil.toSimple(page);
+            return Pair.of(title, page);
+        }).collect(Collectors.toList());
+    }
+
+    @Override
+    protected void save(List<Pair<String, String>> data){
+        data.stream().forEach(elem->{
+            try {
+                Files.write(Paths.get(outputDir, titleToFileName(elem.getLeft())), elem.getRight().getBytes(StandardCharsets.UTF_8));
+            } catch (Exception e){
+                e.printStackTrace();
             }
-            client.getSemaphore(resourceSemaphoreName).release(recordCount);
-            StreamSupport.stream(records.spliterator(), false).forEach(record -> {
-                String title = record.key();
-                String page = record.value();
-                page = clean(page);
-                page = ZhConverterUtil.toSimple(page);
-                try {
-                    Files.write(Paths.get(outputDir, titleToFileName(title)), page.getBytes(StandardCharsets.UTF_8));
-                    System.out.println(outputDir);
-                } catch (Exception e){
-                    e.printStackTrace();
-                }
-            });
-        }
-        client.shutdown();
+        });
+    }
+
+    @Override
+    protected void shutdown(){
+        consumer.close();
+        redissonClient.shutdown();
     }
 
     /**
@@ -127,7 +139,6 @@ public class WikihtmlCleaner extends Cleaner<String> {
      * @param page the html page of the wiki
      * @return the markdown format that has been cleaned
      */
-    @Override
     protected String clean(String page){
         org.jsoup.nodes.Document wikiDoc = Jsoup.parse(page);
         Element root = wikiDoc.root();

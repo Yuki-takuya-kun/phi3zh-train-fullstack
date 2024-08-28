@@ -2,6 +2,7 @@ package phi3zh.dataconverter.cleaner;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
@@ -12,7 +13,6 @@ import org.apache.http.util.EntityUtils;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.redisson.Redisson;
-import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.backoff.BackoffFactory;
@@ -21,18 +21,20 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.producer.Producer;
 import phi3zh.common.utils.backoff.BackoffType;
 import phi3zh.config.Wikitext2HtmlConfig;
-import phi3zh.dataconverter.Converter;
+import phi3zh.dataconverter.StreamConverter;
+import scala.concurrent.impl.FutureConvertersImpl;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
-public class Wikitext2Html implements Converter {
+public class Wikitext2Html extends StreamConverter<List<Pair<String, String>>> {
     private static final String apiUrl = "https://zh.wikipedia.org/w/api.php";
 
     Consumer consumer;
@@ -44,62 +46,68 @@ public class Wikitext2Html implements Converter {
     String kafkaServer;
     String groupId;
     int pollNum;
-    List<String> redisServers;
+    String redisServer;
     Config redisConfig;
-
-    public Wikitext2Html(String loadTopic,
-                         String saveTopic,
-                         String bootstrapServers,
-                         String groupId,
-                         int pollNum){
-        this.sourceTopic = loadTopic;
-        this.targetTopic = saveTopic;
-        this.consumer = Kafka.getStringConsumer(bootstrapServers, groupId, Collections.singletonList(loadTopic), pollNum);
-        this.producer = Kafka.getStringProducer(bootstrapServers);
-
-    }
+    RedissonClient redissonClient;
 
     public Wikitext2Html(Wikitext2HtmlConfig config){
+        super(config.redisConfig(), config.endBucketName());
         this.sourceTopic = config.sourceTopic();
         this.targetTopic = config.targetTopic();
         this.resourceSemaphoreName = config.resourceSemaphoreName();
         this.endBucketName = config.endBucketName();
-        this.redisServers = config.redisServers();
+        this.redisServer = config.redisServer();
         this.kafkaServer = config.kafkaServer();
         this.groupId = config.groupId();
         this.pollNum = config.pollNum();
 
         this.consumer = Kafka.getStringConsumer(kafkaServer, groupId, Collections.singletonList(sourceTopic), pollNum);
         this.producer = Kafka.getStringProducer(kafkaServer);
-        this.redisConfig = new Config();
-        redisServers.stream().parallel().forEach(elem->redisConfig.useSingleServer().setAddress(elem));
+        this.redisConfig = config.redisConfig();
+
+        redissonClient = Redisson.create(redisConfig);
     }
 
     @Override
-    public void run(){
-        RedissonClient client = Redisson.create(this.redisConfig);
-        while(!(Boolean)client.getBucket(endBucketName).get()){
-            ConsumerRecords<String, String> records = this.consumer.poll(Duration.ofSeconds(5)); // load data from kafka
-            int releaseCount = records.count();
-            client.getSemaphore(resourceSemaphoreName).release(releaseCount);
-            StreamSupport.stream(records.spliterator(), true)
-                    .forEach(record -> {
-                        String title = record.key();
-                        String page = record.value();
-                        try {
-                            WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable();
-                            wikitextToHtmlCallable.setText(page);
-                            String htmlPage = BackoffFactory.get(BackoffType.NET_EXP_BACKOFF).wrap(wikitextToHtmlCallable);
-                            ProducerRecord<String, String> producerRecord = new ProducerRecord<>(this.targetTopic, title, htmlPage);
-                            producer.send(producerRecord);
-                            System.out.println("produce element");
-                            System.out.println(targetTopic);
-                        } catch (Throwable e){
-                            e.printStackTrace();
-                        }
-                    });
-        }
-        client.shutdown();
+    protected List<Pair<String, String>> load(){
+        ConsumerRecords<String, String> records = this.consumer.poll(Duration.ofSeconds(5));
+        int releaseCount = records.count();
+        redissonClient.getSemaphore(resourceSemaphoreName).release(releaseCount);
+        return StreamSupport.stream(records.spliterator(), false)
+                .map(record->Pair.of(record.key(), record.value())).collect(Collectors.toList());
+    }
+
+    @Override
+    protected List<Pair<String, String>> process(List<Pair<String, String>> data){
+        return  data.stream().flatMap(elem->{
+            String title = elem.getLeft();
+            String page = elem.getRight();
+            List<Pair<String, String>> res = new ArrayList<>();
+            try {
+                WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable();
+                wikitextToHtmlCallable.setText(page);
+                String htmlPage = BackoffFactory.get(BackoffType.NET_EXP_BACKOFF).wrap(wikitextToHtmlCallable);
+                res.add(Pair.of(title, htmlPage));
+            } catch (Throwable e){
+                e.printStackTrace();
+            }
+            return res.stream();
+        }).collect(Collectors.toList());
+    }
+
+    @Override
+    protected void save(List<Pair<String, String>> data){
+        data.stream().forEach(elem -> {
+            ProducerRecord<String, String> producerRecord = new ProducerRecord<>(this.targetTopic, elem.getLeft(), elem.getRight());
+            producer.send(producerRecord);
+        });
+    }
+
+    @Override
+    protected void shutdown(){
+        consumer.close();
+        producer.close();
+        redissonClient.shutdown();
     }
 
     private class WikitextToHtmlCallable implements Callable<String> {

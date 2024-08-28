@@ -2,15 +2,8 @@ package phi3zh.dataconverter.controller;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
-import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.NewTopic;
-import org.redisson.Redisson;
-import org.redisson.api.RBucket;
-import org.redisson.api.RSemaphore;
-import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
-import phi3zh.common.utils.Kafka;
 import phi3zh.config.CommonConfig;
 import phi3zh.config.WikihtmlCleanerConfig;
 import phi3zh.config.Wikitext2HtmlConfig;
@@ -49,7 +42,7 @@ public class WikiController extends Controller{
             {text2htmlResource, 100}
     }).map(elem->Pair.of((String)elem[0], (Integer)elem[1])).collect(Collectors.toList());
 
-    List<String> redisServers;
+    String redisServer;
 
     CommonConfig commonConfig;
     WikitextCleanerConfig wikitextCleanerConfig;
@@ -62,7 +55,7 @@ public class WikiController extends Controller{
 
     public WikiController(){
         commonConfig = new CommonConfig();
-        this.redisServers = commonConfig.redisServers();
+        this.redisServer = commonConfig.redisServer();
 
         boolean useCache = false;
         boolean enableHighQualDetection = false;
@@ -126,7 +119,7 @@ public class WikiController extends Controller{
         setKafkaConfig(kafkaConfig);
 
         Config redisConfig = new Config();
-        redisServers.stream().forEach(elem -> redisConfig.useSingleServer().setAddress(elem));
+        redisConfig.useSingleServer().setAddress(redisServer);
         setRedisConfig(redisConfig);
 
         initializeKafka();

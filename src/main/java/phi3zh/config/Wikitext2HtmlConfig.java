@@ -1,13 +1,14 @@
 package phi3zh.config;
 
-import java.util.List;
+import org.redisson.config.Config;
 
 public class Wikitext2HtmlConfig {
     private String sourceTopic;
     private String targetTopic;
     private String kafkaServer;
+    private String redisServer;
     private String resourceSemaphoreName;
-    private List<String> redisServers;
+    private Config redisConfig;
 
     private String endBucketName;
     private String groupId = "Wikitext2Html";
@@ -23,7 +24,9 @@ public class Wikitext2HtmlConfig {
         this.resourceSemaphoreName = resouceSemaphoreName;
         this.endBucketName = endBucketName;
         this.kafkaServer = commonConfig.kafkaServer();
-        this.redisServers = commonConfig.redisServers();
+        this.redisServer = commonConfig.redisServer();
+        redisConfig = new Config();
+        redisConfig.useSingleServer().setAddress(redisServer);
     }
 
     public Wikitext2HtmlConfig setSourceTopic(String sourceTopic){
@@ -75,10 +78,7 @@ public class Wikitext2HtmlConfig {
 
     public String groupId(){return this.groupId;}
 
-    public Wikitext2HtmlConfig setRedisServers(List<String> redisServers){
-        this.redisServers = redisServers;
-        return this;
-    }
+    public String redisServer(){return this.redisServer;}
 
-    public List<String> redisServers(){return this.redisServers;}
+    public Config redisConfig(){return this.redisConfig;}
 }

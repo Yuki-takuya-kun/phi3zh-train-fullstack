@@ -8,7 +8,7 @@ public class WikitextCleanerConfig {
     private String targetTopicName;
     private String kafkaServer;
     private String resoucreSemaphoreName;
-    private List<String> redisServers;
+    private String redisServer;
     private boolean useCache;
     private boolean enableHighQualDetection;
 
@@ -26,7 +26,7 @@ public class WikitextCleanerConfig {
         this.useCache = useCache;
         this.enableHighQualDetection = enableHighQualDetection;
         this.kafkaServer = commonConfig.kafkaServer();
-        this.redisServers = commonConfig.redisServers();
+        this.redisServer = commonConfig.redisServer();
     }
 
     public WikitextCleanerConfig setWikidataPath(String wikidataPath){
@@ -71,12 +71,7 @@ public class WikitextCleanerConfig {
 
     public String kafkaServer(){return this.kafkaServer;}
 
-    public WikitextCleanerConfig setRedisServers(List<String> redisServers){
-        this.redisServers = redisServers;
-        return this;
-    }
-
-    public List<String> redisServers(){return this.redisServers;}
+    public String redisServers(){return this.redisServer;}
 
     public WikitextCleanerConfig setResourceSemaphoreName(String resourceSemaphoreName){
         this.resoucreSemaphoreName = resourceSemaphoreName;

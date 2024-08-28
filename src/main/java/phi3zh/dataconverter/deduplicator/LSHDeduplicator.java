@@ -15,6 +15,7 @@ import org.apache.spark.storage.StorageLevel;
 import phi3zh.common.utils.Distance;
 import phi3zh.common.utils.Hasher;
 import phi3zh.config.LSHDeduplicatorConfig;
+import phi3zh.dataconverter.SequenceConverter;
 import phi3zh.dataconverter.blocker.BlockerFactory;
 import phi3zh.dataconverter.blocker.BlockerType;
 import scala.Tuple2;
@@ -37,7 +38,7 @@ import java.util.stream.IntStream;
 import static org.apache.spark.sql.functions.*;
 
 
-public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
+public class LSHDeduplicator extends SequenceConverter<Dataset<Row>> {
 
     private String dataDir; // the path of the inputTextDir
     private String outputDir; // the path of the outputTextDir
@@ -94,9 +95,8 @@ public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
     }
 
     @Override
-    public void run(){
+    protected Dataset<Row> process(Dataset<Row> files){
         try {
-            Dataset<Row> files = loadFiles();
             Dataset<Row> blocksAndNgrams = split2BlocksAndNgrams(files);
             Dataset<Row> blocks = blocksAndNgrams.select(BLOCKID, TEXT);
             // persist blockDf to accelerate
@@ -110,30 +110,53 @@ public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
             sameBlocks.createTempView(SAMEBLOCK_TAB);
             Dataset<Row> deduplicatedBlocks = deduplicate(blocks);
             Dataset<Row> outputData = assembleBlocks(deduplicatedBlocks);
-            save(outputData);
+            return outputData;
         } catch (Exception e){
             throw new RuntimeException(e);
         }
-
     }
 
-    private Dataset<Row> loadFiles(){
-        File folder = new File(this.dataDir);
-        File[] files = folder.listFiles();
-        if (files == null){
-            System.out.println("there are no files in the given dir");
-        }
-        List<Row> filePathList = Arrays.stream(folder.listFiles()).map(file -> RowFactory.create(file.getPath().toString())).collect(Collectors.toList());
-        Dataset<Row> filePaths = spark.createDataFrame(filePathList,
-                new StructType(new StructField[]{
-                        new StructField(FILE_PATH, DataTypes.StringType, false, Metadata.empty())
-                }));
-        Dataset<Row> fileDataset = filePaths.map(
+    @Override
+    protected Dataset<Row> load(){
+//        File folder = new File(this.dataDir);
+//        File[] files = folder.listFiles();
+//        if (files == null){
+//            System.out.println("there are no files in the given dir");
+//        }
+//        List<Row> filePathList = Arrays.stream(folder.listFiles()).map(file -> RowFactory.create(file.getPath().toString())).collect(Collectors.toList());
+//        Dataset<Row> filePaths = spark.createDataFrame(filePathList,
+//                new StructType(new StructField[]{
+//                        new StructField(FILE_PATH, DataTypes.StringType, false, Metadata.empty())
+//                }));
+//        Dataset<Row> fileDataset = filePaths.map(
+//                (MapFunction<Row, Row>) row -> {
+//                    Path filePath = Paths.get((String) row.getAs(FILE_PATH));
+//                    String fileName = filePath.getFileName().toString();
+//                    String fileText = new String(Files.readAllBytes(filePath));
+//                    return RowFactory.create(fileName, fileText);
+//                },
+//                Encoders.row(new StructType(new StructField[]{
+//                        new StructField(FILE_NAME, DataTypes.StringType, false, Metadata.empty()),
+//                        new StructField(TEXT, DataTypes.StringType, false, Metadata.empty())
+//                }))
+//        );
+        //the following code only support for hadoop
+        Dataset<Row> binaryFiles = spark.read().format("binaryFile").load(dataDir+"/*");
+        spark.udf().register("binaryToString", (byte[] binaryData)->{
+            if (binaryData == null){return"";}
+            return new String(binaryData);
+        }, DataTypes.StringType);
+        Dataset<Row> textFiles = binaryFiles.withColumn("content", functions.callUDF("binaryToString",
+                binaryFiles.col("content")));
+        Integer pathIdx = textFiles.schema().fieldIndex("path");
+        Integer contentIdx = textFiles.schema().fieldIndex("content");
+        Dataset<Row> fileDataset = textFiles.map(
                 (MapFunction<Row, Row>) row -> {
-                    Path filePath = Paths.get((String) row.getAs(FILE_PATH));
-                    String fileName = filePath.getFileName().toString();
-                    String fileText = new String(Files.readAllBytes(filePath));
-                    return RowFactory.create(fileName, fileText);
+                    String path = row.getAs(pathIdx);
+                    int fileIdx = path.lastIndexOf('/');
+                    String fileName = path.substring(fileIdx+1);
+                    String text = row.getAs(contentIdx);
+                    return RowFactory.create(fileName, text);
                 },
                 Encoders.row(new StructType(new StructField[]{
                         new StructField(FILE_NAME, DataTypes.StringType, false, Metadata.empty()),
@@ -141,6 +164,21 @@ public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
                 }))
         );
         return fileDataset;
+    }
+
+    // save the file to file system
+    @Override
+    protected void save(Dataset<Row> dataset){
+        Integer FILE_NAME_IDX = dataset.schema().fieldIndex(FILE_NAME);
+        Integer TEXT_IDX = dataset.schema().fieldIndex(TEXT);
+        Broadcast<Integer> broadcastFileName = sc.broadcast(FILE_NAME_IDX, ClassTag$.MODULE$.apply(Integer.class));
+        Broadcast<Integer> broadcastText = sc.broadcast(TEXT_IDX, ClassTag$.MODULE$.apply(Integer.class));
+
+        dataset.foreach(row -> {
+            String fileName = row.getAs(broadcastFileName.value());
+            String text = row.getAs(broadcastText.value());
+            Files.write(Paths.get(this.outputDir, fileName), text.getBytes(StandardCharsets.UTF_8));
+        });
     }
 
     private List<String> split2Ngrams(String inputText, int k){
@@ -316,7 +354,6 @@ public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
         return sameBlocks;
     }
 
-    @Override
     protected Dataset<Row> deduplicate(Dataset<Row> blocks) throws Exception{
         Dataset<Row> vertices = blocks.select(BLOCKID).withColumn(VERTICEID, monotonically_increasing_id());
         JavaRDD<Tuple2<Object, String>> verticesRDD = vertices.toJavaRDD().map(row -> new Tuple2<>(row.getLong(1), row.getString(0)));
@@ -405,18 +442,6 @@ public class LSHDeduplicator extends Deduplicator<Dataset<Row>>{
         return assembledFiles;
     }
 
-    // save the file to file system
-    private void save(Dataset<Row> dataset){
-        Integer FILE_NAME_IDX = dataset.schema().fieldIndex(FILE_NAME);
-        Integer TEXT_IDX = dataset.schema().fieldIndex(TEXT);
-        Broadcast<Integer> broadcastFileName = sc.broadcast(FILE_NAME_IDX, ClassTag$.MODULE$.apply(Integer.class));
-        Broadcast<Integer> broadcastText = sc.broadcast(TEXT_IDX, ClassTag$.MODULE$.apply(Integer.class));
 
-        dataset.foreach(row -> {
-            String fileName = row.getAs(broadcastFileName.value());
-            String text = row.getAs(broadcastText.value());
-            Files.write(Paths.get(this.outputDir, fileName), text.getBytes(StandardCharsets.UTF_8));
-        });
-    }
 
 }

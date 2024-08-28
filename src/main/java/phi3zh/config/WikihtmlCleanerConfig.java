@@ -1,5 +1,6 @@
 package phi3zh.config;
 
+import org.redisson.config.Config;
 import java.util.List;
 
 public class WikihtmlCleanerConfig {
@@ -7,11 +8,12 @@ public class WikihtmlCleanerConfig {
     private String outputDir;
 
     private String kafkaServer;
-    private List<String> redisServers;
+    private String redisServer;
     private String resouceSemaphoreName;
     private String endBucketName;
     private String sourceTopic;
     private String groupId = "topic_htmlCleaner";
+    private Config redisConfig;
     int pollNum = 10;
 
     public WikihtmlCleanerConfig(String outputDir,
@@ -24,7 +26,9 @@ public class WikihtmlCleanerConfig {
         this.resouceSemaphoreName = resouceSemaphoreName;
         this.endBucketName = endBucketName;
         this.kafkaServer = commonConfig.kafkaServer();
-        this.redisServers = commonConfig.redisServers();
+        this.redisServer = commonConfig.redisServer();
+        redisConfig = new Config();
+        redisConfig.useSingleServer().setAddress(redisServer);
     }
 
     public WikihtmlCleanerConfig setOutputDir(String outputDir){
@@ -41,12 +45,7 @@ public class WikihtmlCleanerConfig {
 
     public String kafkaServer(){return this.kafkaServer;}
 
-    public WikihtmlCleanerConfig setRedisServers(List<String> redisServers){
-        this.redisServers = redisServers;
-        return this;
-    }
-
-    public List<String> redisServers(){return this.redisServers;}
+    public Config redisConfig(){return this.redisConfig;}
 
     public WikihtmlCleanerConfig setSourceTopic(String sourceTopic){
         this.sourceTopic = sourceTopic;

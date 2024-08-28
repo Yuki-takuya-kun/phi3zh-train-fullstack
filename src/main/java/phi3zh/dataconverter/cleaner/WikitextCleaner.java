@@ -13,19 +13,19 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.spark.broadcast.Broadcast;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SparkSession;
-import org.checkerframework.checker.units.qual.C;
+import org.apache.spark.api.java.function.FlatMapFunction;
+import org.apache.spark.sql.*;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.redisson.Redisson;
-import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.backoff.BackoffFactory;
 import phi3zh.common.utils.backoff.BackoffType;
 import phi3zh.config.WikitextCleanerConfig;
-import scala.reflect.ClassTag$;
+import phi3zh.dataconverter.SequenceConverter;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -43,7 +43,7 @@ import java.util.stream.StreamSupport;
 
 import static phi3zh.common.utils.Kafka.getStringProducer;
 
-public class WikitextCleaner extends Cleaner<String> {
+public class WikitextCleaner extends SequenceConverter<Dataset<Row>> {
 
     // the flags
     private static final int STARTSWITH = 1;
@@ -112,12 +112,15 @@ public class WikitextCleaner extends Cleaner<String> {
     private static final String ERROR_LOGS = "error_logs";
     private static final String SOURCE_WIKITEXT = "source_wikitext";
 
+    private static final String TITLE = "title";
+    private static final String TEXT = "text";
+
     String wikiDataPath; // the datapath of the wiki database
     String outputDir; // the output directory
     String topicName; // the topic name in kafka
     String bootstrapServers; // the kafka server address
     String resourceSemaphoreName;
-    List<String> redisServers;
+    String redisServer;
     boolean useCache;
     boolean enableHighQualDetection;
 
@@ -157,52 +160,66 @@ public class WikitextCleaner extends Cleaner<String> {
         this.resourceSemaphoreName = config.resourceSemaphoreName();
         this.useCache = config.useCache();
         this.enableHighQualDetection = config.enableHighQualDetection();
-        this.redisServers = config.redisServers();
-
+        this.redisServer = config.redisServers();
     }
 
-    private void load(){
+    @Override
+    protected Dataset<Row> load(){
         Dataset<Row> data = sparkSession.read()
                 .format("xml")
                 .option("rowTag", "page")
                 .load(this.wikiDataPath);
-        this.data = data.select("title", "revision.text");
+        return data.select("title", "revision.text");
     }
 
     @Override
-    public void run(){
-        load();
-        this.data.foreachPartition(iterator->{
-            Config redisConfig = new Config();
-            this.redisServers.stream().forEach(elem->redisConfig.useSingleServer().setAddress(elem));
-            try (Producer producer = getStringProducer(this.bootstrapServers)){
-                RedissonClient redissonClient = Redisson.create(redisConfig);
-                while (iterator.hasNext()){
-                    //redissonClient.getSemaphore(resourceSemaphoreName).acquire();
-                    Row row = iterator.next();
-                    String title = row.getAs("title");
-                    String content = ((Row) row.getAs("text")).getAs("_VALUE");
-                    // remove the 'wikipedia:' 'help:' pages and redirect pages
+    protected Dataset<Row> process(Dataset<Row> data){
+        return data.flatMap(
+                (FlatMapFunction<Row, Row>) row -> {
+                    String title = row.getAs(TITLE);
+                    String content = ((Row) row.getAs(TEXT)).getAs("_VALUE");
+                    List<Row> res = new ArrayList<>();
                     if (!shouldIgnorePage(title, content)){
-                        // conver title and content to simple chinese
-                                String cleanedContent = clean(content);
-                            if (this.enableHighQualDetection && isHighQualText(title, content) || !this.enableHighQualDetection){
-                                Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
-                                        content.getBytes(StandardCharsets.UTF_8));
-                                Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, titleToFileName(title)),
-                                        cleanedContent.getBytes(StandardCharsets.UTF_8));
-                                infoLogger.info(String.format("add page %s to Kafka", title));
-                                ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, cleanedContent);
-                                producer.send(record);
-                            }
-                            else {
-                                infoLogger.info(String.format("ignore page %s for its low quality", title));
-                            }
+                        String cleanedContent = clean(content);
+                        if (this.enableHighQualDetection && isHighQualText(title, content) || !this.enableHighQualDetection){
+                            Files.write(Paths.get(this.outputDir, this.SOURCE_WIKITEXT, titleToFileName(title)),
+                                    content.getBytes(StandardCharsets.UTF_8));
+                            Files.write(Paths.get(this.outputDir, this.CLEANED_WIKITEXT, titleToFileName(title)),
+                                    cleanedContent.getBytes(StandardCharsets.UTF_8));
+                            res.add(RowFactory.create(title, cleanedContent));
+                        }
+                        else {
+                            infoLogger.info(String.format("ignore page %s for its low quality", title));
                         }
                     }
-                redissonClient.shutdown();
+                    return res.iterator();
+                },
+                Encoders.row(new StructType(new StructField[]{
+                        new StructField(TITLE, DataTypes.StringType, false, Metadata.empty()),
+                        new StructField(TEXT, DataTypes.StringType, false, Metadata.empty())
+                }))
+        );
+    }
+
+    @Override
+    public void save(Dataset<Row> data){
+        data.foreachPartition(iterator->{
+            Config redisConfig = new Config();
+            redisConfig.useSingleServer().setAddress(redisServer);
+            RedissonClient redissonClient = Redisson.create(redisConfig);
+            try (Producer producer = getStringProducer(this.bootstrapServers)){
+                while(iterator.hasNext()){
+                    redissonClient.getSemaphore(this.resourceSemaphoreName).acquire();
+                    Row row = iterator.next();
+                    String title = row.getAs(TITLE);
+                    String text = row.getAs(TEXT);
+                    ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, text);
+                    producer.send(record);
                 }
-            });
+            } finally {
+                redissonClient.shutdown();
+            }
+        });
     }
 
     private boolean isRedirectPage(String page){
@@ -223,7 +240,6 @@ public class WikitextCleaner extends Cleaner<String> {
      * @param page the wikitext origin files
      * @return
      */
-    @Override
     protected String clean(String page){
         List<String> removeRegs = new ArrayList<>();
         removeRegs.add("<!--.*?-->"); // comments

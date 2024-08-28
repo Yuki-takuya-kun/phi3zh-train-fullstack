@@ -30,7 +30,7 @@ public abstract class Controller {
     protected AdminClient kafkaClient;
     protected RedissonClient redissonClient;
 
-    private List<Pair<Future, Triple<String, String, String>>> monitorAttrs = Collections.emptyList();
+    private List<Pair<Future, Triple<String, String, String>>> monitorAttrs = new ArrayList<>();
 
     public abstract void run();
 
