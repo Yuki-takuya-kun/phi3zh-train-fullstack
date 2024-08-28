@@ -1,0 +1,17 @@
+
+FROM python:3.10
+WORKDIR /usr/src/app
+
+RUN pip install protobuf==5.27.1
+RUN pip install transformers
+
+RUN mkdir tokenizer
+
+COPY src/main/resources/tokenizer /usr/src/app/tokenizer
+
+COPY src/main/python/service/tokenizer_service.py /usr/src/app
+COPY src/main/python/service/tokenize_pb2.py /usr/src/app
+
+EXPOSE 7983
+
+CMD ["python", "./tokenizer_service.py", "--port", "7983", "--model_dir", "./tokenizer"]
