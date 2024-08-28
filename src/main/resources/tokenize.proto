@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package tokenizeSerialize;
+
+option java_package = "phi3zh.common";
+
+message TextList {
+    repeated string text = 1;
+}
+
+message Tokens {
+    repeated int32 tokens = 1;
+}
+
+message TokenList {
+    repeated Tokens list = 1;
+}
