@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-public class Tokenizer extends SequenceConverter<Dataset<Row>>{
+public class Tokenizer extends SparkConverter {
 
     private static final String FILE_NAME = "fileName";
     private static final String BLOCKID = "blockId";
@@ -38,13 +38,9 @@ public class Tokenizer extends SequenceConverter<Dataset<Row>>{
     private String dataPath;
     private String outputFile;
 
-    private static final SparkSession sparkSession = SparkSession.builder()
-            .appName("tokenizer")
-                .config("spark.master", "local")
-                .getOrCreate();
-
 
     public Tokenizer(TokenizerConfig config){
+        super(config.getSparkAppName(), config.getSparkMaster());
         this.size = config.size();
         this.hostName = config.getHostName();
         this.port = config.port();
