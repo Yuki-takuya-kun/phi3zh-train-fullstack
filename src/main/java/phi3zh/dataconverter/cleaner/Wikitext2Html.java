@@ -2,7 +2,6 @@ package phi3zh.dataconverter.cleaner;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
@@ -10,104 +9,96 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import org.redisson.Redisson;
-import org.redisson.api.RedissonClient;
-import org.redisson.config.Config;
+import org.apache.spark.api.java.function.FlatMapFunction;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.streaming.StreamingQuery;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import phi3zh.common.utils.backoff.BackoffFactory;
-import phi3zh.common.utils.Kafka;
-import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.producer.Producer;
 import phi3zh.common.utils.backoff.BackoffType;
 import phi3zh.config.Wikitext2HtmlConfig;
-import phi3zh.dataconverter.StreamConverter;
-import scala.concurrent.impl.FutureConvertersImpl;
+import phi3zh.dataconverter.SparkKafkaConverter;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
-public class Wikitext2Html extends StreamConverter<List<Pair<String, String>>> {
+public class Wikitext2Html extends SparkKafkaConverter {
     private static final String apiUrl = "https://zh.wikipedia.org/w/api.php";
 
-    Consumer consumer;
-    Producer producer;
     String sourceTopic;
     String targetTopic;
     String resourceSemaphoreName;
     String endBucketName;
     String kafkaServer;
-    String groupId;
-    int pollNum;
     String redisServer;
-    Config redisConfig;
-    RedissonClient redissonClient;
+    String kafkaStartingOffset;
+    String checkpointLocation;
 
     public Wikitext2Html(Wikitext2HtmlConfig config){
-        super(config.redisConfig(), config.endBucketName());
-        this.sourceTopic = config.sourceTopic();
-        this.targetTopic = config.targetTopic();
-        this.resourceSemaphoreName = config.resourceSemaphoreName();
-        this.endBucketName = config.endBucketName();
-        this.redisServer = config.redisServer();
-        this.kafkaServer = config.kafkaServer();
-        this.groupId = config.groupId();
-        this.pollNum = config.pollNum();
-
-        this.consumer = Kafka.getStringConsumer(kafkaServer, groupId, Collections.singletonList(sourceTopic), pollNum);
-        this.producer = Kafka.getStringProducer(kafkaServer);
-        this.redisConfig = config.redisConfig();
-
-        redissonClient = Redisson.create(redisConfig);
+        super(config.getRedisConfig(), config.getEndBucketName(), config.getSparkAppName(),
+                config.getSparkMaster(), config.getKafkaServer(), config.getSourceTopic(),
+                config.getKafkaStartingOffset(), config.getResourceSemaphoreName());
+        this.sourceTopic = config.getSourceTopic();
+        this.targetTopic = config.getTargetTopic();
+        this.resourceSemaphoreName = config.getResourceSemaphoreName();
+        this.endBucketName = config.getEndBucketName();
+        this.redisServer = config.getRedisServer();
+        this.kafkaServer = config.getKafkaServer();
+        this.kafkaStartingOffset = config.getKafkaStartingOffset();
+        this.checkpointLocation = config.getCheckpointLocation();
     }
 
     @Override
-    protected List<Pair<String, String>> load(){
-        ConsumerRecords<String, String> records = this.consumer.poll(Duration.ofSeconds(5));
-        int releaseCount = records.count();
-        redissonClient.getSemaphore(resourceSemaphoreName).release(releaseCount);
-        return StreamSupport.stream(records.spliterator(), false)
-                .map(record->Pair.of(record.key(), record.value())).collect(Collectors.toList());
+    protected Dataset<Row> process(Dataset<Row> data){
+        Dataset<Row> result = data.flatMap(
+            (FlatMapFunction<Row, Row>) row -> {
+                String title = row.getAs(0);
+                String page = row.getAs(1);
+                List<Row> res = new ArrayList<>();
+                try {
+                    WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable();
+                    wikitextToHtmlCallable.setText(page);
+                    String htmlPage = BackoffFactory.get(BackoffType.NET_EXP_BACKOFF).wrap(wikitextToHtmlCallable);
+                    res.add(RowFactory.create(title, htmlPage));
+                } catch (Throwable e){
+                    e.printStackTrace();
+                }
+                return res.iterator();
+            },
+                Encoders.row(new StructType(new StructField[]{
+                        new StructField("key", DataTypes.StringType, false, Metadata.empty()),
+                        new StructField("value", DataTypes.StringType, false, Metadata.empty())
+                }))
+        );
+        return result;
     }
 
     @Override
-    protected List<Pair<String, String>> process(List<Pair<String, String>> data){
-        return  data.stream().flatMap(elem->{
-            String title = elem.getLeft();
-            String page = elem.getRight();
-            List<Pair<String, String>> res = new ArrayList<>();
-            try {
-                WikitextToHtmlCallable wikitextToHtmlCallable = new WikitextToHtmlCallable();
-                wikitextToHtmlCallable.setText(page);
-                String htmlPage = BackoffFactory.get(BackoffType.NET_EXP_BACKOFF).wrap(wikitextToHtmlCallable);
-                res.add(Pair.of(title, htmlPage));
-            } catch (Throwable e){
-                e.printStackTrace();
-            }
-            return res.stream();
-        }).collect(Collectors.toList());
-    }
-
-    @Override
-    protected void save(List<Pair<String, String>> data){
-        data.stream().forEach(elem -> {
-            ProducerRecord<String, String> producerRecord = new ProducerRecord<>(this.targetTopic, elem.getLeft(), elem.getRight());
-            producer.send(producerRecord);
-        });
-    }
-
-    @Override
-    protected void shutdown(){
-        consumer.close();
-        producer.close();
-        redissonClient.shutdown();
+    protected StreamingQuery streamingSave(Dataset<Row> data){
+        try {
+            StreamingQuery streamingQuery = data
+                    .selectExpr("CAST(key AS STRING) as key", "CAST(value AS STRING) as value")
+                    .writeStream()
+                    .outputMode("append")
+                    .format("kafka")
+                    .option("kafka.bootstrap.servers", this.kafkaServer)
+                    .option("topic", this.targetTopic)
+                    .option("checkpointLocation", this.checkpointLocation)
+                    .start();
+            return streamingQuery;
+        } catch (Exception e){
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
     }
 
     private class WikitextToHtmlCallable implements Callable<String> {

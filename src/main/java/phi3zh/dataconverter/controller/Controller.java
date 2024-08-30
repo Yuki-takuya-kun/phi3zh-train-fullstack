@@ -10,11 +10,9 @@ import org.redisson.api.RSemaphore;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.Kafka;
+import phi3zh.common.utils.RedissonClientFactory;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
@@ -25,12 +23,12 @@ public abstract class Controller {
 
     protected List<Triple<String, Integer, Short>> kafkaTopics;
     protected List<Pair<String, Boolean>> booleanBucketWithDefaults;
-    protected List<Pair<String, Integer>> semaphoreWithDefaultValues;
+    protected Map<String, Integer> semaphoreWithDefaultValues;
 
     protected AdminClient kafkaClient;
     protected RedissonClient redissonClient;
 
-    private List<Pair<Future, Triple<String, String, String>>> monitorAttrs = new ArrayList<>();
+    private List<Pair<Future, Triple<String, String, Integer>>> monitorAttrs = new ArrayList<>();
 
     public abstract void run();
 
@@ -50,17 +48,30 @@ public abstract class Controller {
         this.booleanBucketWithDefaults = booleanBucketWithDefaults;
     }
 
-    protected void setSemaphoreWithDefaultValues(List<Pair<String, Integer>> semaphoreWithDefaultValues){
+    protected void setSemaphoreWithDefaultValues(Map<String, Integer> semaphoreWithDefaultValues){
         this.semaphoreWithDefaultValues = semaphoreWithDefaultValues;
     }
 
     protected void initializeKafka(){
         kafkaClient = AdminClient.create(kafkaConfig);
-        kafkaClient.deleteTopics(kafkaTopics.stream().map(Triple::getLeft).collect(Collectors.toList()));
-        List<NewTopic> newTopics = kafkaTopics.stream().map(topic ->
-                        new NewTopic(topic.getLeft(), topic.getMiddle(), topic.getRight()))
-                .collect(Collectors.toList());
-        kafkaClient.createTopics(newTopics);
+        try {
+            Set<String> topicNames = kafkaClient.listTopics().names().get();
+            kafkaClient.deleteTopics(kafkaTopics.stream().flatMap(elem -> {
+                List<String> result = new ArrayList<>();
+                String topic = elem.getLeft();
+                if (topicNames.contains(topic)){
+                    result.add(topic);
+                }
+                return result.stream();
+            }).collect(Collectors.toList())).all().get();
+            List<NewTopic> newTopics = kafkaTopics.stream().map(topic ->
+                            new NewTopic(topic.getLeft(), topic.getMiddle(), topic.getRight()))
+                    .collect(Collectors.toList());
+            kafkaClient.createTopics(newTopics).all().get();
+        } catch (Exception e){
+            throw new RuntimeException(e);
+        }
+
     }
 
     protected void shutdownKafka(){
@@ -69,40 +80,74 @@ public abstract class Controller {
     }
 
     protected void initializeRedis(){
-        redissonClient = Redisson.create(redisConfig);
+        redissonClient = RedissonClientFactory.getInstance(redisConfig);
         booleanBucketWithDefaults.stream().forEach(pair -> {
             RBucket<Boolean> booleanRBucket = redissonClient.getBucket(pair.getLeft());
             booleanRBucket.set(pair.getRight());
         });
-        semaphoreWithDefaultValues.stream().forEach(pair->{
-            RSemaphore semaphore = redissonClient.getSemaphore(pair.getLeft());
-            semaphore.trySetPermits(pair.getRight());
+        semaphoreWithDefaultValues.keySet().forEach(key -> {
+            if (redissonClient.getSemaphore(key).isExists()){
+                redissonClient.getSemaphore(key).delete();
+            }
+            RSemaphore semaphore = redissonClient.getSemaphore(key);
+            semaphore.trySetPermits(semaphoreWithDefaultValues.get(key));
         });
     }
 
     protected void shutdownRedis(){
         booleanBucketWithDefaults.stream().forEach(pair -> redissonClient.getBucket(pair.getLeft()).delete());
-        semaphoreWithDefaultValues.stream().forEach(pair -> redissonClient.getSemaphore(pair.getLeft()).delete());
-        redissonClient.shutdown();
+        semaphoreWithDefaultValues.keySet().forEach(key -> redissonClient.getBucket(key).delete());
+        RedissonClientFactory.shutdown();
     }
 
-    protected void addMonitorAttr(Future future, String bucketName, String topicName, String groupId){
-        if (topicName == null && bucketName != null || topicName != null && bucketName == null){
-            throw new RuntimeException("topicName and bucketName should both null");
+
+    protected void addMonitorAttr(Future future, String signalBucket, String monitorSemaphore, Integer iniVal){
+        if (signalBucket != null && monitorSemaphore != null && iniVal!=null){
+            this.monitorAttrs.add(Pair.of(future, Triple.of(signalBucket, monitorSemaphore, iniVal)));
+        } else if (signalBucket == null && monitorSemaphore == null && iniVal == null){
+            this.monitorAttrs.add(Pair.of(future, Triple.of(null, null, null)));
+        } else {
+            throw new RuntimeException("signalBucket, monitorSemaphore and iniVal should bot null");
         }
-        this.monitorAttrs.add(Pair.of(future, Triple.of(bucketName, topicName, groupId)));
     }
 
     protected void runMonitor(){
         boolean allDone = false;
         while (!allDone){
             boolean allDoneCp = true;
-            for (Pair<Future, Triple<String, String, String>> elem: this.monitorAttrs){
-                Triple<String, String, String> triple = elem.getRight();
+            for (Pair<Future, Triple<String, String, Integer>> elem: this.monitorAttrs){
+                Triple<String, String, Integer> triple = elem.getRight();
                 boolean done = checkDoneTrigger(elem.getLeft(), triple.getLeft(), triple.getMiddle(), triple.getRight());
                 allDoneCp = done && allDoneCp;
             }
             allDone = allDoneCp;
+            try {
+                Thread.sleep(1000);
+            } catch (Exception e){
+                e.printStackTrace();
+            }
+
+        }
+    }
+
+    private boolean checkDoneTrigger(Future future, String signalBucket, String monitorSemaphore, Integer iniVal){
+        try {
+            System.out.println("========");
+            System.out.println(signalBucket);
+            System.out.println(monitorSemaphore);
+            System.out.println(future.isDone());
+            if(!future.isDone()){
+                return false;
+            } else if (monitorSemaphore != null && iniVal != null && signalBucket != null &&
+                    redissonClient.getSemaphore(monitorSemaphore).availablePermits() - iniVal == 0){
+                RBucket<Boolean> signal = redissonClient.getBucket(signalBucket);
+                signal.set(true);
+                return true;
+            } else {
+                return true;
+            }
+        } catch (Exception e){
+            throw new RuntimeException(e);
         }
     }
 
@@ -116,7 +161,7 @@ public abstract class Controller {
             }
             else if (topicName != null && bucketName != null && Kafka.dataSizeUnConsume(this.kafkaClient, topicName, groupId)==0){
                 RBucket<Boolean> bucket = redissonClient.getBucket(bucketName);
-                bucket.set(true);
+                //bucket.set(true);
                 return true;
             } else {
                 return false;

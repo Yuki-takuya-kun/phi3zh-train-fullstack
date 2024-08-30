@@ -25,7 +25,7 @@ import org.redisson.config.Config;
 import phi3zh.common.utils.backoff.BackoffFactory;
 import phi3zh.common.utils.backoff.BackoffType;
 import phi3zh.config.WikitextCleanerConfig;
-import phi3zh.dataconverter.SequenceConverter;
+import phi3zh.dataconverter.SparkConverter;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -43,7 +43,7 @@ import java.util.stream.StreamSupport;
 
 import static phi3zh.common.utils.Kafka.getStringProducer;
 
-public class WikitextCleaner extends SequenceConverter<Dataset<Row>> {
+public class WikitextCleaner extends SparkConverter {
 
     // the flags
     private static final int STARTSWITH = 1;
@@ -126,41 +126,23 @@ public class WikitextCleaner extends SequenceConverter<Dataset<Row>> {
 
     Logger infoLogger = LogManager.getLogger("WikiInfoLogger");
 
-    private Dataset<Row> data;
-    private static final SparkSession sparkSession = SparkSession.builder()
-            .appName("wikitextCleaner")
-            .config("spark.master", "local")
-            .getOrCreate();
-
     // precompile regex pattern
     private static final Pattern BRACKET_PATTERN = Pattern.compile("\\[\\[|\\]\\]|\\{\\{|\\}\\}");
     private static final Pattern CHAPTER_PATTERN = Pattern.compile("=(=+)([^=]*?)=+=");
     private static final Pattern TEMPLATE_PATTERN = Pattern.compile("\\{\\{.*?\\}\\}");
     private static final Pattern REDIRECT_PATTERN = Pattern.compile("#redirect|#重定向");
 
-    public WikitextCleaner(String wikiDataPath,
-                           String outpuDir,
-                           String topicName,
-                           String bootstrapServers,
-                           boolean useCache,
-                           boolean enableHighQualDetection){
-        this.wikiDataPath = wikiDataPath;
-        this.outputDir = outpuDir;
-        this.topicName = topicName;
-        this.bootstrapServers = bootstrapServers;
-        this.useCache = useCache;
-        this.enableHighQualDetection = enableHighQualDetection;
-    }
-
     public WikitextCleaner(WikitextCleanerConfig config){
-        this.wikiDataPath = config.wikidataPath();
-        this.outputDir = config.outputDir();
-        this.topicName = config.targetTopicName();
-        this.bootstrapServers = config.kafkaServer();
-        this.resourceSemaphoreName = config.resourceSemaphoreName();
-        this.useCache = config.useCache();
-        this.enableHighQualDetection = config.enableHighQualDetection();
+        super(config.getSparkAppName(), config.getSparkMaster());
+        this.wikiDataPath = config.getWikidataPathwikidataPath();
+        this.outputDir = config.getOutputDir();
+        this.topicName = config.getTargetTopicName();
+        this.bootstrapServers = config.getKafkaServer();
+        this.resourceSemaphoreName = config.getResoucreSemaphoreName();
+        this.useCache = config.getUseCache();
+        this.enableHighQualDetection = config.getEnableHighQualDetection();
         this.redisServer = config.redisServers();
+
     }
 
     @Override
@@ -203,18 +185,20 @@ public class WikitextCleaner extends SequenceConverter<Dataset<Row>> {
 
     @Override
     public void save(Dataset<Row> data){
+        int titleIdx = data.schema().fieldIndex(TITLE);
+        int textIdx = data.schema().fieldIndex(TEXT);
         data.foreachPartition(iterator->{
             Config redisConfig = new Config();
             redisConfig.useSingleServer().setAddress(redisServer);
             RedissonClient redissonClient = Redisson.create(redisConfig);
             try (Producer producer = getStringProducer(this.bootstrapServers)){
                 while(iterator.hasNext()){
-                    redissonClient.getSemaphore(this.resourceSemaphoreName).acquire();
                     Row row = iterator.next();
-                    String title = row.getAs(TITLE);
-                    String text = row.getAs(TEXT);
+                    String title = row.getAs(titleIdx);
+                    String text = row.getAs(textIdx);
                     ProducerRecord<String, String> record = new ProducerRecord<>(this.topicName, title, text);
-                    producer.send(record);
+                    producer.send(record).get();
+                    redissonClient.getSemaphore(this.resourceSemaphoreName).acquire();
                 }
             } finally {
                 redissonClient.shutdown();

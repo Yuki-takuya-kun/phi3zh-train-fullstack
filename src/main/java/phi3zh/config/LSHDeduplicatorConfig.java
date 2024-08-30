@@ -1,6 +1,8 @@
 package phi3zh.config;
 
 public class LSHDeduplicatorConfig {
+    private String sparkAppName = "LSHDeduplicator";
+    private String sparkMaster;
     private String dataDir;
     private String outputDir;
     private int p = 4;
@@ -11,14 +13,20 @@ public class LSHDeduplicatorConfig {
     private int seed = 1;
 
     public LSHDeduplicatorConfig(String dataDir,
-                                 String outputDir){
+                                 String outputDir,
+                                 CommonConfig commonConfig){
         this.dataDir = dataDir;
         this.outputDir = outputDir;
+        this.sparkMaster = commonConfig.getSparkMaster();
     }
 
     public String getDataDir(){return this.dataDir;}
 
     public String getOutputDir(){return this.outputDir;}
+
+    public String getSparkAppName(){return sparkAppName;}
+
+    public String getSparkMaster(){return sparkMaster;}
 
     public int getP(){return this.p;}
 

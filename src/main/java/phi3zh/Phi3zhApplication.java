@@ -12,6 +12,5 @@ public class Phi3zhApplication {
     public static void main(String[] args){
         WikiController controller = new WikiController();
         controller.run();
-        System.out.println("end");
     }
 }

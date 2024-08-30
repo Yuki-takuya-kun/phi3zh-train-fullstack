@@ -1,8 +1,8 @@
 package phi3zh.config;
 
-import java.util.List;
-
 public class WikitextCleanerConfig {
+    private String sparkMaster;
+    private String sparkAppName = "WikitextCleaner";
     private String wikidataPath;
     private String outputDir;
     private String targetTopicName;
@@ -19,57 +19,62 @@ public class WikitextCleanerConfig {
                            boolean useCache,
                            boolean enableHighQualDetection,
                            CommonConfig commonConfig){
+        this.sparkMaster = commonConfig.getSparkMaster();
         this.wikidataPath = wikidataPath;
         this.outputDir = outputDir;
         this.targetTopicName = targetTopicName;
         this.resoucreSemaphoreName = resoucreSemaphoreName;
         this.useCache = useCache;
         this.enableHighQualDetection = enableHighQualDetection;
-        this.kafkaServer = commonConfig.kafkaServer();
-        this.redisServer = commonConfig.redisServer();
+        this.kafkaServer = commonConfig.getKafkaServer();
+        this.redisServer = commonConfig.getRedisServer();
     }
+
+    public String getSparkMaster(){return sparkMaster;}
+
+    public String getSparkAppName(){return sparkAppName;}
 
     public WikitextCleanerConfig setWikidataPath(String wikidataPath){
         this.wikidataPath =wikidataPath;
         return this;
     }
 
-    public String wikidataPath(){return this.wikidataPath;}
+    public String getWikidataPathwikidataPath(){return this.wikidataPath;}
 
     public WikitextCleanerConfig setOutputDir(String outputDir){
         this.outputDir = outputDir;
         return this;
     }
 
-    public String outputDir(){return outputDir;}
+    public String getOutputDir(){return outputDir;}
 
     public WikitextCleanerConfig setTargetTopicName(String targetTopicName){
         this.targetTopicName = targetTopicName;
         return this;
     }
 
-    public String targetTopicName(){return this.targetTopicName;}
+    public String getTargetTopicName(){return this.targetTopicName;}
 
     public WikitextCleanerConfig setUseCache(boolean useCache){
         this.useCache = useCache;
         return this;
     }
 
-    public boolean useCache(){return this.useCache;}
+    public boolean getUseCache(){return this.useCache;}
 
     public WikitextCleanerConfig setEnableHighQualDetection(boolean enableHighQualDetection){
         this.enableHighQualDetection = enableHighQualDetection;
         return this;
     }
 
-    public boolean enableHighQualDetection(){return this.enableHighQualDetection;}
+    public boolean getEnableHighQualDetection(){return this.enableHighQualDetection;}
 
     public WikitextCleanerConfig setKafkaServer(String kafkaServer){
         this.kafkaServer = kafkaServer;
         return this;
     }
 
-    public String kafkaServer(){return this.kafkaServer;}
+    public String getKafkaServer(){return this.kafkaServer;}
 
     public String redisServers(){return this.redisServer;}
 
@@ -78,6 +83,6 @@ public class WikitextCleanerConfig {
         return this;
     }
 
-    public String resourceSemaphoreName(){return this.resoucreSemaphoreName;}
+    public String getResoucreSemaphoreName(){return this.resoucreSemaphoreName;}
 
 }

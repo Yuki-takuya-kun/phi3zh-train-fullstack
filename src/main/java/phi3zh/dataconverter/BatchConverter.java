@@ -1,6 +1,9 @@
 package phi3zh.dataconverter;
 
-public abstract class SequenceConverter<T> extends Converter<T>{
+import org.apache.spark.sql.SparkSession;
+
+public abstract class BatchConverter<T> extends Converter<T>{
+
     @Override
     public void run(){
         T data0 = load();

@@ -8,6 +8,8 @@ import phi3zh.config.CommonConfig;
 import phi3zh.config.WikihtmlCleanerConfig;
 import phi3zh.config.Wikitext2HtmlConfig;
 import phi3zh.config.WikitextCleanerConfig;
+import phi3zh.dataconverter.SparkKafkaConverter;
+import phi3zh.dataconverter.SparkStreamConverter;
 import phi3zh.dataconverter.cleaner.WikihtmlCleaner;
 import phi3zh.dataconverter.cleaner.Wikitext2Html;
 import phi3zh.dataconverter.cleaner.WikitextCleaner;
@@ -16,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -25,6 +28,7 @@ public class WikiController extends Controller{
     private static final String htmlCleanTopic = "topic_wiki_htmlClean";
 
     private static final String text2htmlResource = "resource_wiki_text2html";
+    private static final String html2mdResource = "resource_wiki_html2md";
 
     private static final String text2htmlEndBucketName = "bucket_end_text2html";
     private static final String htmlCleanerEndBucketName = "bucket_end_htmlCleaner";
@@ -38,9 +42,10 @@ public class WikiController extends Controller{
             {htmlCleanerEndBucketName, false}
     }).map(elem->Pair.of((String)elem[0], (Boolean)elem[1])).collect(Collectors.toList());
 
-    protected List<Pair<String, Integer>> semaphoreWithDefaultValues = Stream.of(new Object[][]{
-            {text2htmlResource, 100}
-    }).map(elem->Pair.of((String)elem[0], (Integer)elem[1])).collect(Collectors.toList());
+    protected Map<String, Integer> semaphoreWithDefaultValues = Stream.of(new Object[][]{
+            {text2htmlResource, 100},
+            {html2mdResource, 50}
+    }).collect(Collectors.toMap(elem->(String)elem[0], elem->(Integer)elem[1]));
 
     String redisServer;
 
@@ -55,12 +60,12 @@ public class WikiController extends Controller{
 
     public WikiController(){
         commonConfig = new CommonConfig();
-        this.redisServer = commonConfig.redisServer();
+        this.redisServer = commonConfig.getRedisServer();
 
         boolean useCache = false;
         boolean enableHighQualDetection = false;
         wikitextCleanerConfig = new WikitextCleanerConfig(
-                "E:\\Datasets\\phi3-zh\\source_dataset\\test.xml",
+                "E:/Datasets/phi3-zh/test/source_dataset/test.xml",
                 "E:/Datasets/phi3-zh/output",
                 text2HtmlTopic,
                 text2htmlResource,
@@ -98,15 +103,22 @@ public class WikiController extends Controller{
         Future wikitext2HtmlFuture = threadPool.submit(wikitext2Html);
         Future wikihtmlCleanerFuture = threadPool.submit(wikihtmlCleaner);
 
-
-        addMonitorAttr(wikitextCleanerFuture, text2htmlEndBucketName, text2HtmlTopic, wikitext2HtmlConfig.groupId());
-        addMonitorAttr(wikitext2HtmlFuture, htmlCleanerEndBucketName, htmlCleanTopic, wikihtmlCleanerConfig.groupId());
+        addMonitorAttr(wikitextCleanerFuture, text2htmlEndBucketName, text2htmlResource, semaphoreWithDefaultValues.get(text2htmlResource));
+        //addMonitorAttr(wikitext2HtmlFuture, null, null, null);
+        addMonitorAttr(wikitext2HtmlFuture, htmlCleanerEndBucketName, html2mdResource, semaphoreWithDefaultValues.get(html2mdResource));
         addMonitorAttr(wikihtmlCleanerFuture, null, null, null);
-        runMonitor();
-
         threadPool.shutdown();
-
+        runMonitor();
+        System.out.println("finish monitor");
+        try {
+            threadPool.awaitTermination(1, TimeUnit.SECONDS);
+        } catch (Exception e){
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
         shutdown();
+        System.out.println("all shutdown");
+
     }
 
     private void initialize(){
@@ -115,7 +127,7 @@ public class WikiController extends Controller{
         setBooleanBucketWithDefaults(booleanBucketWithDefaults);
 
         Properties kafkaConfig = new Properties();
-        kafkaConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, commonConfig.kafkaServer());
+        kafkaConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, commonConfig.getKafkaServer());
         setKafkaConfig(kafkaConfig);
 
         Config redisConfig = new Config();

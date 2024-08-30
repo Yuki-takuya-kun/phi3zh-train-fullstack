@@ -5,20 +5,25 @@ import org.apache.commons.lang3.tuple.ImmutableTriple;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.spark.api.java.function.MapFunction;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.streaming.StreamingQuery;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Element;
 import org.redisson.Redisson;
-import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.Kafka;
 import phi3zh.config.WikihtmlCleanerConfig;
-import phi3zh.dataconverter.StreamConverter;
+import phi3zh.dataconverter.SparkKafkaConverter;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -26,9 +31,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 
-public class WikihtmlCleaner extends StreamConverter<List<Pair<String, String>>> {
+public class WikihtmlCleaner extends SparkKafkaConverter {
 
     private static final List<String> tagDiscard = Stream.of(new String[]{
             "meta", "title", "img", "style", "annotation", "table"
@@ -76,62 +80,55 @@ public class WikihtmlCleaner extends StreamConverter<List<Pair<String, String>>>
     String outputDir;
     String endBucketName;
     String resourceSemaphoreName;
+    String checkpointLocation;
     int pollNum;
-    Config redisConfig;
-    Consumer consumer;
-    RedissonClient redissonClient;
 
     public WikihtmlCleaner(WikihtmlCleanerConfig config){
-        super(config.redisConfig(), config.endBucketName());
-        this.bootstrapServers = config.kafkaServer();
-        this.sourceTopic = config.sourceTopic();
-        this.groupId = config.groupId();
-        this.pollNum = config.pollNum();
-        this.outputDir = config.outputDir();
-        this.redisConfig = config.redisConfig();
+        super(config.getRedisConfig(), config.endBucketName(), config.getSparkAppName(), config.getSparkMaster(),
+        config.getKafkaServer(), config.getSourceTopic(), config.getKafkaStratingOffset());
+        this.bootstrapServers = config.getKafkaServer();
+        this.sourceTopic = config.getSourceTopic();
+        this.groupId = config.getGroupId();
+        this.pollNum = config.getPollNum();
+        this.outputDir = config.getOutputDir();
         this.endBucketName = config.endBucketName();
+        this.checkpointLocation = config.getCheckpointLocation();
         this.resourceSemaphoreName = config.resouceSemaphoreName();
 
-        consumer = Kafka.getStringConsumer(bootstrapServers, groupId, Collections.singletonList(sourceTopic), pollNum);
-        redissonClient = Redisson.create(this.redisConfig);
     }
 
     @Override
-    protected List<Pair<String, String>> load(){
-        ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(5));
-        int recordCount = records.count();
-        redissonClient.getSemaphore(resourceSemaphoreName).release(recordCount);
-        List<Pair<String, String>> result = StreamSupport.stream(records.spliterator(), false)
-                .map(record->Pair.of(record.key(), record.value())).collect(Collectors.toList());
-        return result;
+    protected Dataset<Row> process(Dataset<Row> data){
+        return data.map(
+                (MapFunction<Row, Row>) row -> {
+                    String title = row.getAs(0);
+                    String page = row.getAs(1);
+                    page = clean(page);
+                    page = ZhConverterUtil.toSimple(page);
+                    return RowFactory.create(title, page);
+                },
+                Encoders.row(new StructType(new StructField[]{
+                        new StructField("key", DataTypes.StringType, false, Metadata.empty()),
+                        new StructField("value", DataTypes.StringType, false, Metadata.empty())
+                }))
+        );
     }
 
     @Override
-    protected List<Pair<String, String>> process(List<Pair<String, String>> data){
-        return data.stream().map(elem -> {
-            String title = elem.getLeft();
-            String page = elem.getRight();
-            page = clean(page);
-            page = ZhConverterUtil.toSimple(page);
-            return Pair.of(title, page);
-        }).collect(Collectors.toList());
-    }
-
-    @Override
-    protected void save(List<Pair<String, String>> data){
-        data.stream().forEach(elem->{
-            try {
-                Files.write(Paths.get(outputDir, titleToFileName(elem.getLeft())), elem.getRight().getBytes(StandardCharsets.UTF_8));
-            } catch (Exception e){
-                e.printStackTrace();
-            }
-        });
-    }
-
-    @Override
-    protected void shutdown(){
-        consumer.close();
-        redissonClient.shutdown();
+    protected StreamingQuery streamingSave(Dataset<Row> data){
+        try {
+            StreamingQuery streamingQuery = data
+                    .selectExpr("CAST(key AS STRING) as key", "CAST(value AS STRING) as value")
+                    .writeStream()
+                    .format("json")
+                    .option("checkpointLocation", checkpointLocation)
+                    .option("path", this.outputDir)
+                    .start();
+            return streamingQuery;
+        } catch (Exception e){
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
     }
 
     /**

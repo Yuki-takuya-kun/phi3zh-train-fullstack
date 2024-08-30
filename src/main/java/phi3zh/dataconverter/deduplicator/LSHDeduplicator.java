@@ -15,20 +15,16 @@ import org.apache.spark.storage.StorageLevel;
 import phi3zh.common.utils.Distance;
 import phi3zh.common.utils.Hasher;
 import phi3zh.config.LSHDeduplicatorConfig;
-import phi3zh.dataconverter.SequenceConverter;
+import phi3zh.dataconverter.SparkConverter;
 import phi3zh.dataconverter.blocker.BlockerFactory;
 import phi3zh.dataconverter.blocker.BlockerType;
 import scala.Tuple2;
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
-import scala.concurrent.impl.FutureConvertersImpl;
 import scala.reflect.ClassTag$;
 
-import java.io.File;
-import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.text.MessageFormat;
 import java.util.*;
@@ -38,7 +34,7 @@ import java.util.stream.IntStream;
 import static org.apache.spark.sql.functions.*;
 
 
-public class LSHDeduplicator extends SequenceConverter<Dataset<Row>> {
+public class LSHDeduplicator extends SparkConverter {
 
     private String dataDir; // the path of the inputTextDir
     private String outputDir; // the path of the outputTextDir
@@ -80,6 +76,7 @@ public class LSHDeduplicator extends SequenceConverter<Dataset<Row>> {
     private static final String DEDUPLICATED_VERTICE_TAB = "deduplicatedVertices";
 
     public LSHDeduplicator(LSHDeduplicatorConfig config){
+        super(config.getSparkAppName(), config.getSparkMaster());
         this.dataDir = config.getDataDir();
         this.outputDir = config.getOutputDir();
         this.p = config.getP();
