@@ -4,7 +4,6 @@ import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.streaming.StreamingQuery;
-import org.redisson.Redisson;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import phi3zh.common.utils.RedissonClientFactory;

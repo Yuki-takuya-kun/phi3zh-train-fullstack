@@ -132,10 +132,6 @@ public abstract class Controller {
 
     private boolean checkDoneTrigger(Future future, String signalBucket, String monitorSemaphore, Integer iniVal){
         try {
-            System.out.println("========");
-            System.out.println(signalBucket);
-            System.out.println(monitorSemaphore);
-            System.out.println(future.isDone());
             if(!future.isDone()){
                 return false;
             } else if (monitorSemaphore != null && iniVal != null && signalBucket != null &&
