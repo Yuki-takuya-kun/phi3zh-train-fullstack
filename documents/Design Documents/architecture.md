@@ -13,7 +13,7 @@ This component is responsible to clean the data from datasources, you can load y
 the data from datasources and deeper clean the data in consumer, or only use producer and ignore consumer to process in a step.
 It depends on your need, if you are using producer and consumer architecture, you can use kafka as your message queue.
 
-If you are instrest of the wikicleaner, please refer to [wiki cleaner](./wiki_cleaner.md).
+If you are instrest in wikicleaner, please refer to [wiki cleaner](../en/wiki_cleaner.md).
 Or if you are insterest of how to custom your cleaner, please refer to...
 
 ### Trainer and Application
