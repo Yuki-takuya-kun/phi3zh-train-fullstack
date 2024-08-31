@@ -1,6 +1,8 @@
 package phi3zh.dataconverter;
 
+import org.checkerframework.checker.units.qual.C;
 import org.junit.jupiter.api.Test;
+import phi3zh.config.CommonConfig;
 import phi3zh.config.TokenizerConfig;
 
 public class TestTokenizer {
@@ -9,7 +11,8 @@ public class TestTokenizer {
     private Tokenizer tokenizer;
 
     public TestTokenizer(){
-        TokenizerConfig tokenizerConfig = new TokenizerConfig(hostName, port);
+        CommonConfig commonConfig = new CommonConfig();
+        TokenizerConfig tokenizerConfig = new TokenizerConfig(hostName, port, commonConfig);
         tokenizer = new Tokenizer(tokenizerConfig);
     }
 

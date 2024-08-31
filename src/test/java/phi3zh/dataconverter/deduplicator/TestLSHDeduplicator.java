@@ -1,6 +1,7 @@
 package phi3zh.dataconverter.deduplicator;
 
 import org.junit.jupiter.api.Test;
+import phi3zh.config.CommonConfig;
 import phi3zh.config.LSHDeduplicatorConfig;
 
 public class TestLSHDeduplicator {
@@ -10,7 +11,8 @@ public class TestLSHDeduplicator {
     private LSHDeduplicator lshDeduplicator;
 
     public TestLSHDeduplicator(){
-        LSHDeduplicatorConfig lshDeduplicatorConfig = new LSHDeduplicatorConfig(dataDir, outputDir);
+        CommonConfig commonConfig = new CommonConfig();
+        LSHDeduplicatorConfig lshDeduplicatorConfig = new LSHDeduplicatorConfig(dataDir, outputDir, commonConfig);
         lshDeduplicator = new LSHDeduplicator(lshDeduplicatorConfig);
     }
 
